@@ -1,0 +1,9 @@
+.local/
+__pycache__/
+*.pyc
+.env
+.venv/
+
+php/hackscan-private/data/
+php/hackscan-private/setup-key.txt
+dist/
