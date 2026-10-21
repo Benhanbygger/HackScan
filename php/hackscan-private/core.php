@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.3.0';
+const HS_VERSION = '0.3.1';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
@@ -9,6 +9,7 @@ function hs_db(string $path): PDO {
     $db->exec('PRAGMA busy_timeout=2000');
     $db->exec('CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS results (domain TEXT PRIMARY KEY, current_url TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT \'\', hops INTEGER NOT NULL DEFAULT 0, chain TEXT NOT NULL DEFAULT \'[]\', checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    $db->exec('CREATE TABLE IF NOT EXISTS domains (domain TEXT PRIMARY KEY)');
     $db->exec('CREATE TABLE IF NOT EXISTS attempts (at INTEGER NOT NULL)');
     return $db;
 }
@@ -58,7 +59,7 @@ function hs_fetch(string $url, int $limit=65536, ?callable $consumer=null): arra
     $target=str_contains($ip,':')?'['.$ip.']':$ip;
     $ch=curl_init($url); $body=''; $location=null; $bytes=0; $stopped=false;
     curl_setopt_array($ch,[
-        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>($p['host']==='index.commoncrawl.org'?20:12),
+        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>(in_array($p['host'],['index.commoncrawl.org','tranco-list.eu'],true)?20:12),
         CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2,
         CURLOPT_PROTOCOLS=>CURLPROTO_HTTP|CURLPROTO_HTTPS,
         CURLOPT_USERAGENT=>'HackScan/'.HS_VERSION.' (passive homepage redirect check)',
@@ -110,7 +111,7 @@ function hs_start(PDO $db, mixed $limit=50, mixed $start='0'): void {
     hs_set($db,'target',(string)$limit); hs_set($db,'start_char',$start);
     hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0'); hs_set($db,'discovery_pages','0'); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
     $db->exec("DELETE FROM results WHERE status='pending'");
-    hs_set($db,'phase','metadata'); hs_set($db,'error',''); hs_set($db,'checked','0');
+    hs_set($db,'phase',((int)hs_get($db,'catalog_timestamp','0')>time()-86400 && (int)$db->query('SELECT COUNT(*) FROM domains')->fetchColumn()>0)?'catalog_queue':'catalog'); hs_set($db,'error',''); hs_set($db,'checked','0');
     hs_set($db,'index_attempt','0'); hs_set($db,'notice',''); hs_set($db,'running','1');
 }
 function hs_discover_response(array $response): array {
@@ -133,21 +134,27 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
     if (hs_get($db,'running')!=='1') return;
     $fetch??=fn($url,$limit=65536,$consumer=null)=>hs_fetch($url,$limit,$consumer);
     $phase=hs_get($db,'phase');
-    if (in_array($phase,['metadata','inventory','seek','discovery'],true)) {
+    if (in_array($phase,['catalog','catalog_queue','metadata','inventory','seek','discovery'],true)) {
         if ((int)hs_get($db,'retry_after','0')>time()) return;
-        try { hs_discovery_tick($db,$fetch,$phase); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0'); if (str_starts_with(hs_get($db,'notice'),'Common Crawl svarer langsomt.')) hs_set($db,'notice',''); }
+        try { hs_discovery_tick($db,$fetch,$phase); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0'); if (preg_match('/^(Common Crawl|Tranco) svarer langsomt\./',hs_get($db,'notice'))) hs_set($db,'notice',''); }
         catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
             $retry=(int)hs_get($db,'retry_count','0');
             $transient=($e instanceof HSNetworkError && in_array($e->getCode(),[CURLE_OPERATION_TIMEDOUT,CURLE_COULDNT_CONNECT,CURLE_RECV_ERROR],true)) || preg_match('/HTTP (429|500|502|503|504)/',$e->getMessage());
             if ($transient && $retry<2) {
                 hs_set($db,'retry_count',(string)($retry+1)); hs_set($db,'retry_after',(string)(time()+(2 << $retry)));
-                hs_set($db,'notice','Common Crawl svarer langsomt. Prøver igen om lidt (forsøg '.($retry+2).' af 3).'); return;
+                hs_set($db,'notice',($phase==='catalog'?'Tranco':'Common Crawl').' svarer langsomt. Prøver igen om lidt (forsøg '.($retry+2).' af 3).'); return;
             }
             hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
             $selected=(int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn();
             $indexes=json_decode(hs_get($db,'indexes','[]'),true); $attempt=(int)hs_get($db,'index_attempt','0');
-            if ($phase!=='metadata' && $selected===0 && $attempt+1<count($indexes)) {
+            if (in_array($phase,['catalog','catalog_queue'],true)) {
+                if ((int)$db->query('SELECT COUNT(*) FROM domains')->fetchColumn()>0 && $phase==='catalog') {
+                    hs_set($db,'phase','catalog_queue'); hs_set($db,'notice','Opdatering af domænelisten fejlede. Bruger den tidligere gemte liste.');
+                } else {
+                    hs_set($db,'phase','metadata'); hs_set($db,'notice','Tranco-listen kunne ikke hentes. Prøver Common Crawl.');
+                }
+            } elseif ($phase!=='metadata' && $selected===0 && $attempt+1<count($indexes)) {
                 hs_set($db,'index_attempt',(string)($attempt+1)); hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0');
                 hs_set($db,'phase',hs_get($db,'start_char','0')==='0'?'discovery':'inventory');
                 hs_set($db,'notice','Indekset svarede ikke som forventet; prøver det foregående.');
@@ -186,6 +193,33 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
 // Each browser/cron tick makes at most one index request, including the binary search.
 function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
     $start=hs_get($db,'start_char','0');
+    if ($phase==='catalog') {
+        $r=$fetch('https://tranco-list.eu/download/daily/top-1m.csv.zip',12000000);
+        if ($r['code']!==200 || $r['truncated']) throw new RuntimeException('Tranco-domænelisten kunne ikke hentes (HTTP '.$r['code'].')');
+        $domains=hs_tranco_domains($r['body']);
+        $db->beginTransaction();
+        $db->exec('DELETE FROM domains'); $q=$db->prepare('INSERT INTO domains(domain) VALUES(?)');
+        foreach ($domains as $domain) $q->execute([$domain]);
+        hs_set($db,'catalog_timestamp',(string)time()); hs_set($db,'phase','catalog_queue');
+        $db->commit(); return;
+    }
+    if ($phase==='catalog_queue') {
+        $target=(int)hs_get($db,'target','50');
+        $q=$db->prepare('SELECT domain FROM domains WHERE domain >= ? ORDER BY domain LIMIT '.$target); $q->execute([$start]);
+        $domains=$q->fetchAll(PDO::FETCH_COLUMN);
+        if (!$domains) {
+            hs_set($db,'running','0'); hs_set($db,'phase','done');
+            hs_set($db,'notice','Den gemte Tranco-liste indeholder ingen domæner fra det valgte starttegn og frem.'); return;
+        }
+        $db->beginTransaction();
+        $insert=$db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')");
+        foreach ($domains as $domain) $insert->execute([$domain,'https://'.$domain.'/']);
+        $source='Tranco · hentet '.gmdate('Y-m-d H:i',(int)hs_get($db,'catalog_timestamp')).' UTC';
+        hs_set($db,'source',$source); hs_set($db,'phase','scan');
+        $note=hs_get($db,'notice');
+        if (count($domains)<$target) $note.=($note!==''?' ':'').'Listen indeholder kun '.count($domains).' af '.$target.' ønskede domæner fra '.strtoupper($start).' og frem.';
+        hs_set($db,'notice',$note); $db->commit(); return;
+    }
     if ($phase==='metadata') {
         $indexes=hs_discover_response($fetch('https://index.commoncrawl.org/collinfo.json',524288));
         hs_set($db,'indexes',json_encode($indexes)); hs_set($db,'phase',$start==='0'?'discovery':'inventory'); return;
@@ -264,4 +298,40 @@ function hs_groups(PDO $db,string $search,array $params=[]): array {
         $groups[$key]=['rows'=>$q->fetchAll(),'total'=>$total,'page'=>$page,'pages'=>(int)ceil($total/8)];
     }
     return $groups;
+}
+
+// The public Tranco archive contains one DEFLATE CSV entry. Verify ZIP structure,
+// output length and CRC before importing; never extract an archive onto disk.
+// This uses PHP's standard zlib extension, not the optional ZipArchive extension.
+function hs_tranco_domains(string $zip): array {
+    if (!function_exists('gzinflate')) throw new RuntimeException('PHP zlib mangler til domænelisten');
+    if (strlen($zip)>12000000) throw new RuntimeException('Domænearkivet er for stort');
+    $end=strrpos($zip,"PK\x05\x06");
+    if ($end===false || $end+22>strlen($zip)) throw new RuntimeException('Ugyldigt Tranco ZIP-arkiv');
+    $e=unpack('vdisk/vcd_disk/vdisk_entries/ventries/Vcd_size/Vcd_offset/vcomment_length',substr($zip,$end+4,18));
+    if ($e['disk']!==0 || $e['cd_disk']!==0 || $e['entries']!==1 || $e['disk_entries']!==1 || $end+22+$e['comment_length']!==strlen($zip) || $e['cd_offset']+$e['cd_size']>$end) throw new RuntimeException('ZIP-formatet understøttes ikke');
+    $pos=$e['cd_offset'];
+    if (substr($zip,$pos,4)!=="PK\x01\x02" || $pos+46>$end) throw new RuntimeException('ZIP-indekset er ugyldigt');
+    $c=unpack('vmade/vneeded/vflags/vmethod/vtime/vdate/Vcrc/Vcompressed/Vuncompressed/vname_length/vextra_length/vcomment_length/vdisk/vattributes/Vexternal/Voffset',substr($zip,$pos+4,42));
+    $name=substr($zip,$pos+46,$c['name_length']);
+    if ($name!=='top-1m.csv' || $c['disk']!==0 || ($c['flags']&1)!==0 || $c['method']!==8 || $c['uncompressed']>40000000 || $c['compressed']<1 || $c['compressed']>12000000) throw new RuntimeException('Uventet eller for stort indhold i ZIP-arkivet');
+    $pos=$c['offset'];
+    if (substr($zip,$pos,4)!=="PK\x03\x04" || $pos+30>$e['cd_offset']) throw new RuntimeException('ZIP-data mangler');
+    $local=unpack('vneeded/vflags/vmethod/vtime/vdate/Vcrc/Vcompressed/Vuncompressed/vname_length/vextra_length',substr($zip,$pos+4,26));
+    if ($local['method']!==8 || ($local['flags']&1)!==0 || substr($zip,$pos+30,$local['name_length'])!==$name) throw new RuntimeException('ZIP-posterne stemmer ikke overens');
+    $start=$pos+30+$local['name_length']+$local['extra_length'];
+    if ($start+$c['compressed']>$e['cd_offset']) throw new RuntimeException('ZIP-data er afkortet');
+    $csv=@gzinflate(substr($zip,$start,$c['compressed']),40000000);
+    if ($csv===false || strlen($csv)!==$c['uncompressed'] || sprintf('%08x',crc32($csv))!==sprintf('%08x',$c['crc'])) throw new RuntimeException('Domænearkivets integritetskontrol fejlede');
+    $domains=[]; $offset=0; $size=strlen($csv);
+    while ($offset<$size) {
+        $end=strpos($csv,"\n",$offset); if ($end===false) $end=$size;
+        $line=trim(substr($csv,$offset,$end-$offset)); $offset=$end+1;
+        $comma=strpos($line,','); if ($comma===false) continue;
+        $rank=substr($line,0,$comma); $domain=hs_host(substr($line,$comma+1));
+        if (!preg_match('/^[0-9]+$/D',$rank) || strlen($domain)>253 || !preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.dk$/D',$domain)) continue;
+        $domains[$domain]=true;
+    }
+    if (!$domains) throw new RuntimeException('Tranco-listen indeholdt ingen gyldige .dk-domæner');
+    $out=array_keys($domains); sort($out,SORT_STRING); return $out;
 }

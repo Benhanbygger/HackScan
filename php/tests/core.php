@@ -17,7 +17,7 @@ check(hs_outcome('example.dk','https://other.dk/',200)==='review','cross-domain 
 check(hs_outcome('example.dk','https://example.dk/',503)==='http_error','HTTP error distinguished from normal response');
 check(hs_extract_domain(['url'=>'https://www.example.dk/'])==='example.dk','homepage discovery normalizes www');
 check(hs_extract_domain(['url'=>'https://example.dk/article'])===null && hs_extract_domain(['url'=>'https://example.com/'])===null,'discovery excludes non-homepage and non-Danish domains');
-$db=hs_db(':memory:'); hs_start($db,2);
+$db=hs_db(':memory:'); hs_start($db,2); hs_set($db,'phase','metadata');
 $indexes=[['cdx-api'=>'https://index.commoncrawl.org/CC-MAIN-2026-43-index'],['cdx-api'=>'https://index.commoncrawl.org/CC-MAIN-2026-39-index']];
 hs_tick($db,fn()=>response(200,null,json_encode($indexes)));
 check(hs_get($db,'phase')==='discovery','metadata stage advances to discovery');
@@ -61,7 +61,7 @@ foreach ([0,-1,10001,'2.5','abc'] as $invalid) rejects(fn()=>hs_options($invalid
 foreach (['ab','*','../','æ',''] as $invalid) rejects(fn()=>hs_options(50,$invalid),'invalid start character rejected');
 check(hs_extract_domain(['url'=>'https://sub.example.dk/'])===null,'discovery uses primary .dk domains for alphabetic positioning');
 check(hs_options('125','M')===[125,'m'],'count and uppercase start are normalized');
-$db=hs_db(':memory:'); hs_start($db,3,'m');
+$db=hs_db(':memory:'); hs_start($db,3,'m'); hs_set($db,'phase','metadata');
 hs_tick($db,fn()=>response(200,null,json_encode($indexes)));
 check(hs_get($db,'phase')==='inventory','letter start requires index positioning');
 hs_tick($db,fn()=>response(200,null,json_encode(['pages'=>4])));
@@ -90,4 +90,33 @@ check(count($groups['all']['rows'])===8 && count($groups['review']['rows'])===2 
 check(hs_groups($db,'100%')['all']['total']===1,'search treats percent as literal text');
 check(hs_groups($db,"' OR 1=1 --")['all']['total']===0,'search resists SQL injection');
 check(hs_groups($db,'',['page_all'=>999])['all']['page']===2,'out-of-range pagination clamps to last page');
+// Validated public-list discovery works without the Common Crawl inventory API.
+function fixture_zip(string $csv,string $name='top-1m.csv'): string {
+    $payload=gzdeflate($csv); $crc=crc32($csv); $n=strlen($name); $c=strlen($payload); $u=strlen($csv);
+    $local=pack('VvvvvvVVVvv',0x04034b50,20,0,8,0,0,$crc,$c,$u,$n,0).$name.$payload;
+    $central=pack('VvvvvvvVVVvvvvvVV',0x02014b50,20,20,0,8,0,0,$crc,$c,$u,$n,0,0,0,0,0,0).$name;
+    return $local.$central.pack('VvvvvVVv',0x06054b50,0,0,1,1,strlen($central),strlen($local),0);
+}
+$zip=fixture_zip("1,zebra.dk\n2,alpha.dk\n3,mango.dk\n4,mango.dk\n5,other.com\n6,sub.alpha.dk\n");
+check(hs_tranco_domains($zip)===['alpha.dk','mango.dk','zebra.dk'],'Tranco ZIP import sorts and deduplicates primary Danish domains');
+rejects(fn()=>hs_tranco_domains(fixture_zip('1,alpha.dk','../secret.csv')),'unexpected ZIP paths rejected without extraction');
+rejects(fn()=>hs_tranco_domains(substr($zip,0,-8)),'truncated ZIP rejected');
+$corrupt=$zip; $central=strpos($corrupt,"PK\x01\x02"); $corrupt[$central+16]=chr(ord($corrupt[$central+16])^1);
+rejects(fn()=>hs_tranco_domains($corrupt),'CRC mismatch rejected before importing any domains');
+$db=hs_db(':memory:'); hs_start($db,1,'m');
+$calls=0;
+hs_tick($db,function($url) use ($zip,&$calls) { $calls++; check(str_contains($url,'tranco-list.eu'),'first discovery request uses working public catalog'); return response(200,null,$zip); });
+check(hs_get($db,'phase')==='catalog_queue' && (int)$db->query('SELECT COUNT(*) FROM domains')->fetchColumn()===3,'validated catalog persisted separately from results');
+hs_tick($db,fn()=>throw new RuntimeException('Network should not be used to select cached domains'));
+check($db->query('SELECT domain FROM results')->fetchColumn()==='mango.dk' && hs_get($db,'phase')==='scan','M start selects sorted cached domains without inventory or seek requests');
+hs_start($db,10,'m');
+check(hs_get($db,'phase')==='catalog_queue','fresh cache skips all external discovery requests on next scan');
+hs_tick($db,fn()=>throw new RuntimeException('Network should not be used for a fresh cache'));
+check((int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn()===2 && str_contains(hs_get($db,'notice'),'2 af 10'),'catalog shortfall reported instead of inventing or silently limiting results');
+$db=hs_db(':memory:'); hs_start($db);
+hs_tick($db,fn()=>response(403));
+check(hs_get($db,'phase')==='metadata' && hs_get($db,'running')==='1','unavailable public catalog falls back to Common Crawl');
+$db->exec("INSERT INTO domains(domain) VALUES('cached.dk')"); hs_set($db,'catalog_timestamp',(string)(time()-90000));
+hs_start($db); hs_tick($db,fn()=>response(403));
+check(hs_get($db,'phase')==='catalog_queue' && str_contains(hs_get($db,'notice'),'tidligere gemte'),'older validated cache retained when a refresh fails');
 echo "\n$passed checks passed.\n";

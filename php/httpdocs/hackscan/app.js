@@ -4,7 +4,7 @@ const csrf = root.dataset.csrf;
 const el = id => document.getElementById(id);
 const keys = ['all', 'review', 'ok', 'errors'];
 const labels = {pending:'Afventer',review:'Bør undersøges',ok:'Samme domæne',error:'Kontrolfejl',http_error:'HTTP-fejl',cancelled:'Stoppet'};
-const phases = {idle:'Klar til scanning',metadata:'Henter indeksoversigt',inventory:'Finder startposition',seek:'Finder startposition',discovery:'Finder danske forsider',scan:'Kontrollerer viderestillinger',done:'Scanning afsluttet',failed:'Scanning afbrudt',stopped:'Scanning stoppet'};
+const phases = {catalog:'Henter domæneliste',catalog_queue:'Vælger domæner fra den gemte liste',idle:'Klar til scanning',metadata:'Henter indeksoversigt',inventory:'Finder startposition',seek:'Finder startposition',discovery:'Finder danske forsider',scan:'Kontrollerer viderestillinger',done:'Scanning afsluttet',failed:'Scanning afbrudt',stopped:'Scanning stoppet'};
 let groups = {}, busy = false, timer, queuedAction = null, searchTimer, initialized = false;
 const pages = Object.fromEntries(keys.map(key => [key, 0]));
 function schedule() {
@@ -98,6 +98,7 @@ async function refresh() {
   el('progress').value = goal ? Math.min(100, 100 * value / goal) : 0;
   el('error').textContent = data.state.error;
   el('notice').textContent = data.state.notice;
+  if (el('source')) el('source').textContent = data.state.source ? 'Datakilde: ' + data.state.source : '';
   return data.state.running;
 }
 async function cycle() {

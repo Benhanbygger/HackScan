@@ -1,17 +1,19 @@
 """Build full and upgrade Plesk archives; runtime data and secrets are never included."""
 from pathlib import Path
 import zipfile
+import re
 
 source = Path(__file__).resolve().parent
 out = source.parent / 'dist'
 out.mkdir(exist_ok=True)
 public = source / 'httpdocs'
 private = source / 'hackscan-private'
+version = re.search(r"const HS_VERSION = '([^']+)'", (private / 'core.php').read_text()).group(1)
 full = [source / 'UPLOAD-VEJLEDNING.md', source / 'OPDATERING.md', public, private]
 full += sorted(public.rglob('*')) + sorted(private.rglob('*'))
 upgrade = [source / 'OPDATERING.md', private, public, public / 'hackscan',
            private / 'app.php', private / 'core.php', public / 'hackscan/app.js', public / 'hackscan/style.css']
-for name, paths in [('HackScan-Plesk.zip', full), ('HackScan-Opdatering-0.3.0.zip', upgrade)]:
+for name, paths in [('HackScan-Plesk.zip', full), (f'HackScan-Opdatering-{version}.zip', upgrade)]:
     target = out / name
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
         for path in paths:

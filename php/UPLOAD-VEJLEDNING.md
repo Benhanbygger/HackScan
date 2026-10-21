@@ -63,7 +63,7 @@ Du bliver logget ind. Engangsnøglen slettes automatisk; hvis programmet viser e
 
 ## 5. Test første scanning
 
-Vælg et mål på **1–10.000 domæner** og et **starttegn (0–9 eller A–Z)**. Klik **Start scanning**, og lad fanen stå åben. Programmet finder selv primære .dk-domæner fra det valgte tegn og frem og kontrollerer ét trin ad gangen. Startpunktet er et minimum, ikke et krav om samme begyndelsesbogstav for alle resultater.
+Vælg et mål på **1–10.000 domæner** og et **starttegn (0–9 eller A–Z)**. Klik **Start scanning**, og lad fanen stå åben. Programmet henter selv en offentlig Tranco-domæneliste, gemmer .dk-domæner privat og vælger fra det valgte tegn og frem og kontrollerer ét trin ad gangen. Startpunktet er et minimum, ikke et krav om samme begyndelsesbogstav for alle resultater.
 
 - **Bør undersøges**: forsiden ender på et andet værtsnavn, eller et sådant hop er set, men slutdestinationen kunne ikke kontrolleres.
 - **Samme domæne**: ingen forskel bortset fra HTTP/HTTPS og www.
@@ -72,7 +72,7 @@ Vælg et mål på **1–10.000 domæner** og et **starttegn (0–9 eller A–Z)*
 - **Hent CSV** eksporterer gemte resultater.
 - **Stop** afbryder kommende trin. En igangværende HTTP-forespørgsel får først lov at afslutte.
 
-Hvis Common Crawl giver timeout eller HTTP 504, forsøges igen med ventetid, før det foregående indeks prøves. Fejler begge, vises fejlen, og du kan prøve igen senere. En vellykket hentning af indeksoversigten garanterer ikke, at selve domænesøgningen altid svarer.
+Tranco-listen genbruges i 24 timer. Kan den ikke opdateres, genbruges en ældre verificeret liste; uden en gemt liste forsøges Common Crawl som reserve. Hvis Common Crawl giver timeout eller HTTP 504, forsøges igen med ventetid, før det foregående indeks prøves. Fejler begge, vises fejlen, og du kan prøve igen senere. En vellykket hentning af indeksoversigten garanterer ikke, at selve domænesøgningen altid svarer.
 
 En ny scanning tager udgangspunkt i det valgte starttegn og kan læse flere indekssider, indtil målet er nået eller en grænse/fejl stopper søgningen. Det er et udsnit, ikke en komplet eller garanteret frisk liste over danske hjemmesider. Eksisterende domæner kan blive kontrolleret igen.
 
