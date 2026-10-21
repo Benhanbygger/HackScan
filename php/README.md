@@ -1,10 +1,10 @@
-# HackScan PHP
+# HackScan PHP 0.3.0
 
-PHP-version til Plesk med PHP 8.2+ (8.4 anbefales), cURL og PDO SQLite. Ingen Composer, Python eller Node kræves på serveren. Se [UPLOAD-VEJLEDNING.md](UPLOAD-VEJLEDNING.md).
+PHP-version til Plesk med PHP 8.2+ (8.4 anbefales), cURL og PDO SQLite. Ingen Composer, Python eller Node kræves på serveren. Se [UPLOAD-VEJLEDNING.md](UPLOAD-VEJLEDNING.md) til ny installation og [OPDATERING.md](OPDATERING.md) til eksisterende installationer.
 
 `httpdocs/hackscan` er offentlige filer. `hackscan-private` er søskende til `httpdocs`, aldrig en undermappe. Login med adgangskodehash, CSRF, loginbegrænsning, private sessioner, HTTPS og blokeret første opsætning indtil en privat engangsnøgle findes. SQLite og køtilstand overlever genstart. Browser og valgfri CLI-arbejder serialiserer opgaver med en fil-lås.
 
-Scanningen består af små trin: indeksoversigt, en indeksside (op til 50 forskellige .dk-forsider), et redirect-hop pr. trin. Ved fejl i nyeste indeks prøves forrige indeks i et senere trin. Hvert netværkskald har 12 sekunders timeout; HTTP-fallback på forbindelsesfejl kan give to kald i et trin. Ingen TLS-nedgradering ved certifikatfejl. DNS skal være tilgængeligt. PHP cURL bruger miljøets proxy, hvis defineret, og `CURLOPT_CONNECT_TO` fastlåser destinationen til en valideret offentlig IP uden at ændre TLS-værtsnavnet.
+Scanningen består af små trin: indeksoversigt, valg af startposition og flere indekssider (et brugerdefineret mål på 1–10.000 primære .dk-domæner), et redirect-hop pr. trin. Ved fejl i nyeste indeks prøves forrige indeks i et senere trin. Common Crawl-kald har 20 sekunders timeout, hjemmesidekald har 12 sekunder; HTTP-fallback på forbindelsesfejl kan give to kald i et trin. Ingen TLS-nedgradering ved certifikatfejl. DNS skal være tilgængeligt. PHP cURL bruger miljøets proxy, hvis defineret, og `CURLOPT_CONNECT_TO` fastlåser destinationen til en valideret offentlig IP uden at ændre TLS-værtsnavnet.
 
 ## Lokal validering
 
@@ -33,3 +33,25 @@ Valgfri ekstern funktionstest (foretager rigtige forespørgsler til Common Crawl
 ```
 
 Ingen runtime-data, engangsnøgler eller konti skal med i uploadpakken. Bevar eksisterende installationsdata ved senere opdateringer. Browserstart og `worker.php` bruger samme database og fil-lås. En inaktiv kørsel uden pending-domæner foretager ingen netværkskald.
+
+## Dashboard og tests
+
+Alle fire resultatgrupper har serverbaseret søgning og selvstændig sideinddeling med otte rækker pr. side. Diagrammet viser faktiske seneste statusantal, ikke historik eller estimeret hacking.
+
+For starttegn efter 0 hentes indeksstørrelsen og derefter bestemmes startblokken med binær søgning i sorterede CDX-sider (`limit=1`). Næste browser-/cron-trin henter domæner fra den fundne side. Ingen tidligere domæner end starttegnet bliver køsat. Starttegnet normaliseres til ASCII a–z/0–9; internationale domænenavne ses i deres punycode-form. Hvert trin foretager højst ét Common Crawl-kald.
+
+Browserkontroller på desktop og mobil (kræver udviklingsværktøjet Playwright, aldrig på Plesk-serveren):
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH=/workspace/.tools/playwright node php/tests/browser.cjs
+```
+
+Testen bruger midlertidige konti og testdata, kontrollerer alle fire paneler, søgning, selvstændig sideinddeling, synlige diagramsegmenter, valg af antal/starttegn og mobil-layout. Den starter ikke en ekstern scanning.
+
+En lille manuel ekstern test med startpunkt M:
+
+```sh
+/workspace/.tools/php/php php/tests/live.php 3 m
+```
+
+Eksterne tests kan fejle ved Common Crawls HTTP 504 eller timeouts, selv om lokal funktionalitet og serveradgang fungerer.

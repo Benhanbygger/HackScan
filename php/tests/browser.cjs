@@ -1,0 +1,82 @@
+'use strict';
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {spawn, spawnSync} = require('node:child_process');
+const crypto = require('node:crypto');
+const {chromium} = require('playwright');
+const {setTimeout:delay} = require('node:timers/promises');
+const php = process.env.HACKSCAN_PHP || '/workspace/.tools/php/php';
+const source = path.resolve(__dirname, '..');
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hackscan-browser-'));
+const passed = [];
+function check(condition, name) { if (!condition) throw Error(name); passed.push(name); console.log('PASS:', name); }
+(async () => {
+ let browser, server;
+ try {
+  fs.cpSync(path.join(source, 'httpdocs'), path.join(temp, 'httpdocs'), {recursive:true});
+  fs.cpSync(path.join(source, 'hackscan-private'), path.join(temp, 'hackscan-private'), {recursive:true, filter:p => !['data','setup-key.txt'].includes(path.basename(p))});
+  const key=crypto.randomBytes(32).toString('hex'), password=crypto.randomBytes(24).toString('hex');
+  fs.writeFileSync(path.join(temp,'hackscan-private/setup-key.txt'),key,{mode:0o600});
+  const net=require('node:net');
+  const port=await new Promise(resolve=>{const socket=net.createServer(); socket.listen(0,'127.0.0.1',()=>{const p=socket.address().port; socket.close(()=>resolve(p));});});
+  server=spawn(php,['-S',`127.0.0.1:${port}`,'-t',path.join(temp,'httpdocs')],{stdio:'ignore'});
+  const url=`http://127.0.0.1:${port}/hackscan/`;
+  for(let i=0;i<60;i++){try{await fetch(url);break;}catch{await delay(100);}}
+  browser=await chromium.launch({headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:1000},deviceScaleFactor:1});
+  const errors=[]; page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(url);
+  await page.locator('[name=setup_key]').fill(key);
+  await page.locator('[name=password]').fill(password);
+  await page.locator('[name=confirm]').fill(password);
+  await Promise.all([page.waitForURL('**/index.php'),page.getByRole('button',{name:'Opret adgang'}).click()]);
+  const seed=spawnSync(php,['-r',`require $argv[1].'/core.php'; $db=hs_db($argv[1].'/data/hackscan.sqlite3'); $q=$db->prepare('INSERT INTO results(domain,current_url,status,detail) VALUES(?,?,?,?)'); for($i=0;$i<24;$i++){ $status=['review','ok','http_error','error'][$i%4]; $q->execute(['eksempel'.str_pad((string)$i,2,'0',STR_PAD_LEFT).'.dk',$status==='review'?'https://ny-adresse.dk/':'https://eksempel'.$i.'.dk/',$status,$status==='error'?'Forbindelsen fik timeout':'HTTP '.($status==='http_error'?'503':'200')]); }`,path.join(temp,'hackscan-private')],{encoding:'utf8'});
+  if(seed.status!==0) throw Error(seed.stderr);
+  await page.reload();
+  await page.waitForFunction(()=>document.getElementById('total').textContent==='24');
+  check(await page.locator('.logo').count()===1,'small HackScan logo appears at top left');
+  check(await page.locator('.result-panel').count()===4,'all four result groups exist simultaneously');
+  check(await page.locator('#rows-all tr').count()===8,'all-results panel is paginated');
+  check(await page.locator('#rows-review tr').count()===6,'review panel contains flagged results');
+  check(await page.locator('#rows-ok tr').count()===6,'same-domain panel contains normal results');
+  check(await page.locator('#rows-errors tr').count()===8,'error panel merges HTTP and connection errors');
+  check(await page.locator('#errors').textContent()==='12','combined error count reflects real fixture rows');
+  check(await page.locator('#pct-review').textContent()==='25%','chart uses measured status counts');
+  check(await page.locator('#pct-errors').textContent()==='50%','chart combines HTTP and connection errors');
+  check(await page.locator('#arc-review').evaluate(node=>parseFloat(getComputedStyle(node).strokeDasharray)>0),'chart SVG segments have visible measured arcs');
+  await page.locator('[data-page=all][data-direction="1"]').click();
+  await page.waitForFunction(()=>document.getElementById('range-all').textContent.startsWith('9–16'));
+  check((await page.locator('#range-review').textContent()).startsWith('1–6'),'each panel paginates independently');
+  await page.locator('#search').fill('eksempel00.dk');
+  await page.waitForFunction(()=>document.getElementById('count-all').textContent==='1');
+  check(await page.locator('#count-review').textContent()==='1','global search filters review panel too');
+  check(await page.locator('#count-ok').textContent()==='0','global search filters same-domain panel too');
+  await page.locator('#search').fill('');
+  await page.waitForFunction(()=>document.getElementById('count-all').textContent==='24');
+  await page.locator('#scan-limit').fill('75'); await page.locator('#start-char').selectOption('m');
+  await page.route('**/index.php?api=tick',route=>route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'}));
+  await page.locator('#start').click();
+  await page.waitForFunction(()=>document.getElementById('live-status').textContent==='Scanning aktiv');
+  check(await page.locator('#scan-limit').isDisabled(),'scan options lock while scan is active');
+  check(await page.locator('#progress-label').textContent()==='0 / 75','requested scan count reaches backend and progress display');
+  await page.locator('#stop').click();
+  await page.waitForFunction(()=>document.getElementById('live-status').textContent==='Klar til scanning');
+  check(await page.locator('#scan-limit').isEnabled(),'scan options unlock after stopping');
+  check(await page.locator('#start-char').inputValue()==='m','chosen starting letter retained after scan stops');
+  const artifacts=path.resolve(source,'../dist'); fs.mkdirSync(artifacts,{recursive:true});
+  await page.screenshot({path:path.join(artifacts,'dashboard-desktop.png'),fullPage:true});
+  await page.screenshot({path:path.join(artifacts,'dashboard-desktop-top.png')});
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'desktop has no horizontal page overflow');
+  await page.setViewportSize({width:390,height:844});
+  await page.screenshot({path:path.join(artifacts,'dashboard-mobile.png'),fullPage:true});
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'mobile layout has no horizontal page overflow');
+  check(await page.locator('#panel-errors').isVisible(),'all groups remain present in mobile layout');
+  check(errors.length===0,'dashboard has no browser JavaScript errors');
+  console.log(`\n${passed.length} browser checks passed.`);
+ } finally {
+  if(browser) await browser.close();
+  if(server){server.kill();await new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});}
+  fs.rmSync(temp,{recursive:true,force:true});
+ }
+})().catch(error=>{console.error(error);process.exitCode=1;});

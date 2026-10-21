@@ -63,18 +63,18 @@ Du bliver logget ind. Engangsnøglen slettes automatisk; hvis programmet viser e
 
 ## 5. Test første scanning
 
-Klik **Start scanning**, og lad fanen stå åben. Programmet henter selv op til 50 .dk-forsider og kontrollerer ét trin ad gangen.
+Vælg et mål på **1–10.000 domæner** og et **starttegn (0–9 eller A–Z)**. Klik **Start scanning**, og lad fanen stå åben. Programmet finder selv primære .dk-domæner fra det valgte tegn og frem og kontrollerer ét trin ad gangen. Startpunktet er et minimum, ikke et krav om samme begyndelsesbogstav for alle resultater.
 
 - **Bør undersøges**: forsiden ender på et andet værtsnavn, eller et sådant hop er set, men slutdestinationen kunne ikke kontrolleres.
 - **Samme domæne**: ingen forskel bortset fra HTTP/HTTPS og www.
 - **HTTP-fejl** / **Kontrolfejl**: et fejlresultat, ikke et bevis på hacking.
-- Vælg **Alle** for også at se normale resultater og igangværende kontroller.
+- Alle fire resultatgrupper vises samtidig, hver med sin egen sideinddeling. Søgningen øverst søger i alle gemte resultater.
 - **Hent CSV** eksporterer gemte resultater.
 - **Stop** afbryder kommende trin. En igangværende HTTP-forespørgsel får først lov at afslutte.
 
-Hvis Common Crawl giver timeout eller HTTP 504, forsøges det foregående indeks i næste trin. Fejler begge, vises fejlen, og du kan prøve igen senere. En vellykket hentning af indeksoversigten garanterer ikke, at selve domænesøgningen altid svarer.
+Hvis Common Crawl giver timeout eller HTTP 504, forsøges igen med ventetid, før det foregående indeks prøves. Fejler begge, vises fejlen, og du kan prøve igen senere. En vellykket hentning af indeksoversigten garanterer ikke, at selve domænesøgningen altid svarer.
 
-En ny scanning prøver næste indeksside. Det er et udsnit, ikke en komplet eller garanteret frisk liste over danske hjemmesider. Eksisterende domæner kan blive kontrolleret igen.
+En ny scanning tager udgangspunkt i det valgte starttegn og kan læse flere indekssider, indtil målet er nået eller en grænse/fejl stopper søgningen. Det er et udsnit, ikke en komplet eller garanteret frisk liste over danske hjemmesider. Eksisterende domæner kan blive kontrolleret igen.
 
 ## 6. Valgfrit: kør videre uden en åben browser
 

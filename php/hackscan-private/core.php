@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.2.0';
+const HS_VERSION = '0.3.0';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
@@ -58,7 +58,7 @@ function hs_fetch(string $url, int $limit=65536, ?callable $consumer=null): arra
     $target=str_contains($ip,':')?'['.$ip.']':$ip;
     $ch=curl_init($url); $body=''; $location=null; $bytes=0; $stopped=false;
     curl_setopt_array($ch,[
-        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>12,
+        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>($p['host']==='index.commoncrawl.org'?20:12),
         CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2,
         CURLOPT_PROTOCOLS=>CURLPROTO_HTTP|CURLPROTO_HTTPS,
         CURLOPT_USERAGENT=>'HackScan/'.HS_VERSION.' (passive homepage redirect check)',
@@ -80,7 +80,7 @@ function hs_fetch(string $url, int $limit=65536, ?callable $consumer=null): arra
     ]);
     $ok=curl_exec($ch); $error=curl_error($ch); $errno=curl_errno($ch); $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE); curl_close($ch);
     if ($ok===false && !($stopped && $errno===CURLE_WRITE_ERROR)) throw new HSNetworkError('Netværksfejl: '.$error,$errno);
-    return ['code'=>$code,'location'=>$location,'body'=>$body,'truncated'=>$stopped];
+    return ['code'=>$code,'location'=>$location,'body'=>$body,'truncated'=>$stopped,'empty'=>$bytes===0];
 }
 function hs_join(string $base,string $target): string {
     $target=trim($target);
@@ -99,7 +99,16 @@ function hs_join(string $base,string $target): string {
 function hs_outcome(string $domain,string $url,int $code): string {
     return hs_host(parse_url($url,PHP_URL_HOST)??'')!==hs_host($domain)?'review':($code>=400?'http_error':'ok');
 }
-function hs_start(PDO $db): void {
+function hs_options(mixed $limit=50, mixed $start='0'): array {
+    $number=filter_var($limit,FILTER_VALIDATE_INT);
+    if ($number===false || $number<1 || $number>10000) throw new InvalidArgumentException('Vælg mellem 1 og 10.000 domæner.');
+    if (!is_string($start) || !preg_match('/^[0-9a-z]$/D',strtolower($start))) throw new InvalidArgumentException('Vælg ét starttegn: 0–9 eller A–Z.');
+    return [$number,strtolower($start)];
+}
+function hs_start(PDO $db, mixed $limit=50, mixed $start='0'): void {
+    [$limit,$start]=hs_options($limit,$start);
+    hs_set($db,'target',(string)$limit); hs_set($db,'start_char',$start);
+    hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0'); hs_set($db,'discovery_pages','0'); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
     $db->exec("DELETE FROM results WHERE status='pending'");
     hs_set($db,'phase','metadata'); hs_set($db,'error',''); hs_set($db,'checked','0');
     hs_set($db,'index_attempt','0'); hs_set($db,'notice',''); hs_set($db,'running','1');
@@ -116,7 +125,7 @@ function hs_discover_response(array $response): array {
 }
 function hs_extract_domain(array $record): ?string {
     $p=parse_url($record['url']??''); $host=hs_host($p['host']??'');
-    if (!str_ends_with($host,'.dk') || !in_array($p['path']??'',['','/'],true) || !empty($p['query'])) return null;
+    if (!preg_match('/^[a-z0-9-]+\.dk$/D',$host) || !in_array($p['path']??'',['','/'],true) || !empty($p['query'])) return null;
     try { hs_url('https://'.$host.'/'); } catch (Throwable) { return null; }
     return $host;
 }
@@ -124,40 +133,29 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
     if (hs_get($db,'running')!=='1') return;
     $fetch??=fn($url,$limit=65536,$consumer=null)=>hs_fetch($url,$limit,$consumer);
     $phase=hs_get($db,'phase');
-    if ($phase==='metadata') {
-        $indexes=hs_discover_response($fetch('https://index.commoncrawl.org/collinfo.json',524288));
-        hs_set($db,'indexes',json_encode($indexes)); hs_set($db,'phase','discovery'); return;
-    }
-    if ($phase==='discovery') {
-        $indexes=json_decode(hs_get($db,'indexes','[]'),true); $attempt=(int)hs_get($db,'index_attempt','0');
-        $endpoint=$indexes[$attempt]??null;
-        if (!$endpoint) throw new RuntimeException('Ingen tilgængelige indekser');
-        $page=(int)hs_get($db,'next_page','0');
-        $url=$endpoint.'?'.http_build_query(['url'=>'*.dk','output'=>'json','pageSize'=>1,'page'=>$page]);
-        $buffer=''; $found=[];
-        $consume=function($chunk) use (&$buffer,&$found) {
-            $buffer.=$chunk;
-            if (strlen($buffer)>1048576) return false;
-            while (($pos=strpos($buffer,"\n"))!==false) {
-                $line=substr($buffer,0,$pos); $buffer=substr($buffer,$pos+1);
-                $r=json_decode($line,true);
-                if (is_array($r) && ($d=hs_extract_domain($r))!==null) $found[$d]=true;
-                if (count($found)>=50) return false;
+    if (in_array($phase,['metadata','inventory','seek','discovery'],true)) {
+        if ((int)hs_get($db,'retry_after','0')>time()) return;
+        try { hs_discovery_tick($db,$fetch,$phase); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0'); if (str_starts_with(hs_get($db,'notice'),'Common Crawl svarer langsomt.')) hs_set($db,'notice',''); }
+        catch (Throwable $e) {
+            if ($db->inTransaction()) $db->rollBack();
+            $retry=(int)hs_get($db,'retry_count','0');
+            $transient=($e instanceof HSNetworkError && in_array($e->getCode(),[CURLE_OPERATION_TIMEDOUT,CURLE_COULDNT_CONNECT,CURLE_RECV_ERROR],true)) || preg_match('/HTTP (429|500|502|503|504)/',$e->getMessage());
+            if ($transient && $retry<2) {
+                hs_set($db,'retry_count',(string)($retry+1)); hs_set($db,'retry_after',(string)(time()+(2 << $retry)));
+                hs_set($db,'notice','Common Crawl svarer langsomt. Prøver igen om lidt (forsøg '.($retry+2).' af 3).'); return;
             }
-            return true;
-        };
-        try {
-            $response=$fetch($url,8000000,$consume);
-            if ($buffer!=='' && count($found)<50) { $r=json_decode($buffer,true); if (is_array($r) && ($d=hs_extract_domain($r))!==null) $found[$d]=true; }
-            if ($response['code']!==200 || !$found) throw new RuntimeException('Common Crawl gav ingen forsider (HTTP '.$response['code'].')');
-        } catch (Throwable $e) {
-            if ($attempt+1<count($indexes)) { hs_set($db,'index_attempt',(string)($attempt+1)); hs_set($db,'notice','Seneste indeks fejlede; prøver det foregående.'); return; }
-            hs_set($db,'next_page','0'); throw $e;
+            hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
+            $selected=(int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn();
+            $indexes=json_decode(hs_get($db,'indexes','[]'),true); $attempt=(int)hs_get($db,'index_attempt','0');
+            if ($phase!=='metadata' && $selected===0 && $attempt+1<count($indexes)) {
+                hs_set($db,'index_attempt',(string)($attempt+1)); hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0');
+                hs_set($db,'phase',hs_get($db,'start_char','0')==='0'?'discovery':'inventory');
+                hs_set($db,'notice','Indekset svarede ikke som forventet; prøver det foregående.');
+            } elseif ($selected>0) {
+                hs_set($db,'phase','scan'); hs_set($db,'notice',"Fandt $selected af ".hs_get($db,'target','50').' ønskede domæner. Søgningen stoppede: '.substr($e->getMessage(),0,180));
+            } else throw $e;
         }
-        $q=$db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')");
-        $db->beginTransaction();
-        foreach (array_keys($found) as $domain) $q->execute([$domain,'https://'.$domain.'/']);
-        hs_set($db,'next_page',(string)($page+1)); hs_set($db,'phase','scan'); hs_set($db,'notice',''); hs_set($db,'source',$endpoint); $db->commit(); return;
+        return;
     }
     $row=$db->query("SELECT * FROM results WHERE status='pending' ORDER BY domain LIMIT 1")->fetch();
     if (!$row) { hs_set($db,'running','0'); hs_set($db,'phase','done'); return; }
@@ -182,4 +180,88 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
     }
     $db->prepare('UPDATE results SET current_url=?,status=?,detail=?,hops=?,chain=?,checked_at=CURRENT_TIMESTAMP WHERE domain=?')->execute([$url,$status,$detail,$hops,json_encode($chain),$row['domain']]);
     if ($status!=='pending') hs_set($db,'checked',(string)((int)hs_get($db,'checked','0')+1));
+}
+
+// Seek a matching page via its first CDX record (the API's documented limit=1).
+// Each browser/cron tick makes at most one index request, including the binary search.
+function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
+    $start=hs_get($db,'start_char','0');
+    if ($phase==='metadata') {
+        $indexes=hs_discover_response($fetch('https://index.commoncrawl.org/collinfo.json',524288));
+        hs_set($db,'indexes',json_encode($indexes)); hs_set($db,'phase',$start==='0'?'discovery':'inventory'); return;
+    }
+    $indexes=json_decode(hs_get($db,'indexes','[]'),true); $attempt=(int)hs_get($db,'index_attempt','0');
+    $endpoint=$indexes[$attempt]??null;
+    if (!$endpoint) throw new RuntimeException('Ingen tilgængelige indekser');
+    if ($phase==='inventory') {
+        $r=$fetch($endpoint.'?'.http_build_query(['url'=>'*.dk','showNumPages'=>'true','pageSize'=>1]),65536);
+        $info=json_decode($r['body'],true);
+        if ($r['code']!==200 || !is_array($info) || (int)($info['pages']??0)<1) throw new RuntimeException('Kunne ikke læse indeksstørrelsen (HTTP '.$r['code'].')');
+        hs_set($db,'seek_low','0'); hs_set($db,'seek_high',(string)(int)$info['pages']); hs_set($db,'phase','seek'); return;
+    }
+    if ($phase==='seek') {
+        $low=(int)hs_get($db,'seek_low'); $high=(int)hs_get($db,'seek_high');
+        if ($low>=$high) { hs_set($db,'next_page',(string)max(0,$low-1)); hs_set($db,'phase','discovery'); return; }
+        $steps=(int)hs_get($db,'seek_steps');
+        if ($steps>=32) throw new RuntimeException('Startposition kunne ikke bestemmes');
+        $mid=intdiv($low+$high,2);
+        $r=$fetch($endpoint.'?'.http_build_query(['url'=>'*.dk','output'=>'json','pageSize'=>1,'page'=>$mid,'limit'=>1]),131072);
+        $line=explode("\n",trim($r['body']))[0]; $json=json_decode($line,true);
+        $key=is_array($json)?($json['urlkey']??$json['key']??''):preg_split('/\s+/',$line)[0];
+        if ($r['code']!==200 || !is_string($key) || !str_starts_with($key,'dk,')) throw new RuntimeException('Startposition kunne ikke læses (HTTP '.$r['code'].')');
+        if (strcmp($key,'dk,'.$start)<=0) $low=$mid+1; else $high=$mid;
+        hs_set($db,'seek_low',(string)$low); hs_set($db,'seek_high',(string)$high); hs_set($db,'seek_steps',(string)($steps+1)); return;
+    }
+    $target=(int)hs_get($db,'target','50'); $selected=(int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn();
+    $remaining=$target-$selected;
+    if ($remaining<=0) { hs_set($db,'phase','scan'); return; }
+    $page=(int)hs_get($db,'next_page','0');
+    $pages=(int)hs_get($db,'discovery_pages','0');
+    if ($pages>=100) throw new RuntimeException('Søgegrænsen på 100 indekssider er nået');
+    $url=$endpoint.'?'.http_build_query(['url'=>'*.dk','output'=>'json','pageSize'=>1,'page'=>$page]);
+    $buffer=''; $found=[];
+    $exists=$db->prepare("SELECT 1 FROM results WHERE domain=? AND status='pending'");
+    $add=function($r) use (&$found,$start,$exists) {
+        if (!is_array($r) || ($d=hs_extract_domain($r))===null || strcmp($d[0],$start)<0) return;
+        $exists->execute([$d]); if (!$exists->fetchColumn()) $found[$d]=true;
+    };
+    $consume=function($chunk) use (&$buffer,&$found,$remaining,$add) {
+        $buffer.=$chunk; if (strlen($buffer)>1048576) return false;
+        while (($pos=strpos($buffer,"\n"))!==false) {
+            $line=substr($buffer,0,$pos); $buffer=substr($buffer,$pos+1); $add(json_decode($line,true));
+            if (count($found)>=$remaining) return false;
+        }
+        return true;
+    };
+    $r=$fetch($url,8000000,$consume);
+    if ($r['code']!==200) throw new RuntimeException('Common Crawl-søgning fejlede (HTTP '.$r['code'].')');
+    if ($buffer!=='' && count($found)<$remaining) $add(json_decode($buffer,true));
+    // A completely empty page means there are no more blocks; a page without
+    // matching homepages can still be followed by useful blocks.
+    if (!$found && $r['body']==='' && !$r['truncated'] && ($r['empty']??false)) throw new RuntimeException('Ingen flere domæner i indekset');
+    $q=$db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')");
+    $db->beginTransaction();
+    foreach (array_slice(array_keys($found),0,$remaining) as $domain) $q->execute([$domain,'https://'.$domain.'/']);
+    $selected+=(int)count($found);
+    hs_set($db,'next_page',(string)($page+1)); hs_set($db,'discovery_pages',(string)($pages+1));
+    hs_set($db,'phase',$selected>=$target?'scan':'discovery'); hs_set($db,'source',$endpoint);
+    hs_set($db,'notice',$selected<$target?"Finder domæner: $selected af $target …":'');
+    $db->commit();
+}
+
+function hs_groups(PDO $db,string $search,array $params=[]): array {
+    $groups=[];
+    foreach (['all'=>'1=1','review'=>"status='review'",'ok'=>"status='ok'",'errors'=>"status IN ('error','http_error')"] as $key=>$where) {
+        $args=[];
+        if ($search!=='') {
+            $where.=" AND (domain LIKE ? ESCAPE '\\' OR current_url LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\')";
+            $term='%'.str_replace(['\\','%','_'],['\\\\','\\%','\\_'],$search).'%'; $args=[$term,$term,$term];
+        }
+        $q=$db->prepare('SELECT COUNT(*) FROM results WHERE '.$where); $q->execute($args); $total=(int)$q->fetchColumn();
+        $raw=$params['page_'.$key]??0; $requested=is_scalar($raw)?max(0,min(1000000,(int)$raw)):0;
+        $page=min($requested,max(0,(int)ceil($total/8)-1));
+        $q=$db->prepare('SELECT * FROM results WHERE '.$where.' ORDER BY checked_at DESC,domain LIMIT 8 OFFSET '.($page*8)); $q->execute($args);
+        $groups[$key]=['rows'=>$q->fetchAll(),'total'=>$total,'page'=>$page,'pages'=>(int)ceil($total/8)];
+    }
+    return $groups;
 }

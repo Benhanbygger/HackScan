@@ -67,9 +67,16 @@ with tempfile.TemporaryDirectory(prefix='hackscan-web-') as tmp:
         check('HttpOnly' in cookie._rest and cookie._rest.get('SameSite')=='Strict','session cookie restricts browser access and cross-site use')
         check("frame-ancestors 'none'" in headers.get('Content-Security-Policy',''),'response has restrictive content policy')
         check(call('/hackscan/index.php?api=start',{})[0]==403,'scan start requires CSRF')
-        code,body,_=call('/hackscan/index.php?api=start',{}, {'X-CSRF-Token':token2})
+        check(call('/hackscan/index.php?api=start',{'limit':'0','start_char':'m'}, {'X-CSRF-Token':token2})[0]==400,'invalid scan limit rejected by HTTP API')
+        check(call('/hackscan/index.php?api=start',{'limit':'75','start_char':'ab'}, {'X-CSRF-Token':token2})[0]==400,'invalid start character rejected by HTTP API')
+        code,body,_=call('/hackscan/index.php?api=start',{'limit':'75','start_char':'M'}, {'X-CSRF-Token':token2})
         check(code==200,'authenticated scan start accepted')
         check(call('/hackscan/index.php?api=start',{}, {'X-CSRF-Token':token2})[0]==409,'duplicate scan start rejected')
+        _,statebody,_=call('/hackscan/index.php?api=state')
+        import json
+        state=json.loads(statebody)
+        check(state['state']['target']==75 and state['state']['start_char']=='m','chosen scan count and start persist through HTTP requests')
+        check(set(state['groups'])=={'all','review','ok','errors'},'state API serves all four dashboard panels together')
         database=root/'hackscan-private/data/hackscan.sqlite3'
         with sqlite3.connect(database) as db:
             stored=db.execute("SELECT value FROM settings WHERE name='password_hash'").fetchone()[0]
