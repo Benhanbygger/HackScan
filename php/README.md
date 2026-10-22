@@ -1,4 +1,4 @@
-# HackScan PHP 0.4.0
+# HackScan PHP 0.5.0
 
 PHP-version til Plesk med PHP 8.2+ (8.4 anbefales), cURL og PDO SQLite. Ingen Composer, Python eller Node kræves på serveren. Se [UPLOAD-VEJLEDNING.md](UPLOAD-VEJLEDNING.md) til ny installation og [OPDATERING.md](OPDATERING.md) til eksisterende installationer.
 
@@ -66,7 +66,7 @@ Tranco: Victor Le Pochat, Tom Van Goethem, Samaneh Tajalizadehkhoob, Maciej Korc
 
 Livevalidering af 0.3.1: Tranco-listen blev hentet og verificeret under en PHP-hukommelsesgrænse på 128 MB. Tre automatisk opdagede domæner fra M blev kontrolleret: to normale HTTP 200-resultater og én håndteret forbindelsesfejl. Den fulde 10.000-domænescanning er ikke kørt; listen indeholdt 2.402 .dk-domæner ved hentningen.
 
-## Sikkerhedsrapporter og brugere i 0.4.0
+## Sikkerhedsrapporter og brugere i 0.5.0
 
 Se [SECURITY.md](SECURITY.md) for alle begrænsninger, datakilder, den foreløbige karakters metode og adgangsroller. Se [OPDATERING.md](OPDATERING.md) for installation med eksisterende konto/data. Domænelinks åbner rapporter; eksterne besøg har en separat genvej. HTTP-koder lagres som faktiske observationer og www-normalisering ignoreres ved domænesammenligning.
 
@@ -77,3 +77,5 @@ Nye isolerede sikkerheds- og kontotests:
 ```
 
 Browserkontrollerne omfatter nu også rapporter, kodefarver, adminoprettelse, læserbegrænsninger og sessionstilbagekaldelse. Der er ingen virkelige adgangskoder i testdata eller skærmbilleder.
+
+Navneserverfiltre og manuel scanning testes med `/workspace/.tools/php/php php/tests/filters.php`. Se OPDATERING.md for DNS-reserve, afgrænsning og visningsfilter.

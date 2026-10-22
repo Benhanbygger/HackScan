@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.4.2';
+const HS_VERSION = '0.5.0';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
@@ -9,6 +9,7 @@ function hs_db(string $path): PDO {
     $db->exec('PRAGMA busy_timeout=2000');
     $db->exec('CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)');
     $db->exec('CREATE TABLE IF NOT EXISTS results (domain TEXT PRIMARY KEY, current_url TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT \'\', hops INTEGER NOT NULL DEFAULT 0, chain TEXT NOT NULL DEFAULT \'[]\', checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    $db->exec('CREATE TABLE IF NOT EXISTS ns_candidates (domain TEXT PRIMARY KEY)');
     $db->exec('CREATE TABLE IF NOT EXISTS domains (domain TEXT PRIMARY KEY)');
     $db->exec('CREATE TABLE IF NOT EXISTS attempts (at INTEGER NOT NULL)');
     hs_security_schema($db); hs_users_schema($db);
@@ -114,8 +115,12 @@ function hs_options(mixed $limit=50, mixed $start='0'): array {
     if (!is_string($start) || !preg_match('/^[0-9a-z]$/D',strtolower($start))) throw new InvalidArgumentException('Vælg ét starttegn: 0–9 eller A–Z.');
     return [$number,strtolower($start)];
 }
-function hs_start(PDO $db, mixed $limit=50, mixed $start='0'): void {
+function hs_start(PDO $db, mixed $limit=50, mixed $start='0', mixed $providers=[]): void {
     [$limit,$start]=hs_options($limit,$start);
+    $providers=hs_ns_options($providers);
+    $db->exec('DELETE FROM ns_candidates');
+    hs_set($db,'ns_providers',json_encode($providers)); hs_set($db,'ns_retry_domain','');
+    foreach (['ns_checked','ns_matched','ns_errors','ns_done'] as $key) hs_set($db,$key,'0');
     hs_set($db,'target',(string)$limit); hs_set($db,'start_char',$start);
     hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0'); hs_set($db,'discovery_pages','0'); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
     $db->exec('DELETE FROM security_jobs');
@@ -139,10 +144,11 @@ function hs_extract_domain(array $record): ?string {
     try { hs_url('https://'.$host.'/'); } catch (Throwable) { return null; }
     return $host;
 }
-function hs_tick(PDO $db, ?callable $fetch=null): void {
+function hs_tick(PDO $db, ?callable $fetch=null, ?callable $nsResolver=null): void {
     if (hs_get($db,'running')!=='1') return;
     $fetch??=fn($url,$limit=65536,$consumer=null)=>hs_fetch($url,$limit,$consumer);
     $phase=hs_get($db,'phase');
+    if ($phase==='ns_filter' || ($phase==='scan' && hs_ns_selected($db) && hs_get($db,'ns_done')!=='1')) { hs_ns_tick($db,$nsResolver,$fetch); return; }
     if (in_array($phase,['catalog','catalog_queue','metadata','inventory','seek','discovery'],true)) {
         if ((int)hs_get($db,'retry_after','0')>time()) return;
         try { hs_discovery_tick($db,$fetch,$phase); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0'); if (preg_match('/^(Common Crawl|Tranco) svarer langsomt\./',hs_get($db,'notice'))) hs_set($db,'notice',''); }
@@ -155,7 +161,7 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
                 hs_set($db,'notice',($phase==='catalog'?'Tranco':'Common Crawl').' svarer langsomt. Prøver igen om lidt (forsøg '.($retry+2).' af 3).'); return;
             }
             hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
-            $selected=(int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn();
+            $selected=hs_discovery_count($db);
             $indexes=json_decode(hs_get($db,'indexes','[]'),true); $attempt=(int)hs_get($db,'index_attempt','0');
             if (in_array($phase,['catalog','catalog_queue'],true)) {
                 if ((int)$db->query('SELECT COUNT(*) FROM domains')->fetchColumn()>0 && $phase==='catalog') {
@@ -216,6 +222,11 @@ function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
         $db->commit(); return;
     }
     if ($phase==='catalog_queue') {
+        if (hs_ns_selected($db)) {
+            $db->prepare('INSERT OR IGNORE INTO ns_candidates(domain) SELECT domain FROM domains WHERE domain >= ?')->execute([$start]);
+            hs_set($db,'source','Tranco · hentet '.gmdate('Y-m-d H:i',(int)hs_get($db,'catalog_timestamp')).' UTC');
+            hs_set($db,'phase','ns_filter'); return;
+        }
         $target=(int)hs_get($db,'target','50');
         $q=$db->prepare('SELECT domain FROM domains WHERE domain >= ? ORDER BY domain LIMIT '.$target); $q->execute([$start]);
         $domains=$q->fetchAll(PDO::FETCH_COLUMN);
@@ -258,7 +269,7 @@ function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
         if (strcmp($key,'dk,'.$start)<=0) $low=$mid+1; else $high=$mid;
         hs_set($db,'seek_low',(string)$low); hs_set($db,'seek_high',(string)$high); hs_set($db,'seek_steps',(string)($steps+1)); return;
     }
-    $target=(int)hs_get($db,'target','50'); $selected=(int)$db->query("SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn();
+    $target=hs_discovery_target($db); $selected=hs_discovery_count($db);
     $remaining=$target-$selected;
     if ($remaining<=0) { hs_set($db,'phase','scan'); return; }
     $page=(int)hs_get($db,'next_page','0');
@@ -266,7 +277,7 @@ function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
     if ($pages>=100) throw new RuntimeException('Søgegrænsen på 100 indekssider er nået');
     $url=$endpoint.'?'.http_build_query(['url'=>'*.dk','output'=>'json','pageSize'=>1,'page'=>$page]);
     $buffer=''; $found=[];
-    $exists=$db->prepare("SELECT 1 FROM results WHERE domain=? AND status='pending'");
+    $exists=$db->prepare(hs_ns_selected($db)?'SELECT 1 FROM ns_candidates WHERE domain=?':"SELECT 1 FROM results WHERE domain=? AND status='pending'");
     $add=function($r) use (&$found,$start,$exists) {
         if (!is_array($r) || ($d=hs_extract_domain($r))===null || strcmp($d[0],$start)<0) return;
         $exists->execute([$d]); if (!$exists->fetchColumn()) $found[$d]=true;
@@ -285,9 +296,10 @@ function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
     // A completely empty page means there are no more blocks; a page without
     // matching homepages can still be followed by useful blocks.
     if (!$found && $r['body']==='' && !$r['truncated'] && ($r['empty']??false)) throw new RuntimeException('Ingen flere domæner i indekset');
-    $q=$db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')");
+    $filtered=hs_ns_selected($db);
+    $q=$db->prepare($filtered?"INSERT OR IGNORE INTO ns_candidates(domain) VALUES(?)":"INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')");
     $db->beginTransaction();
-    foreach (array_slice(array_keys($found),0,$remaining) as $domain) $q->execute([$domain,'https://'.$domain.'/']);
+    foreach (array_slice(array_keys($found),0,$remaining) as $domain) $q->execute($filtered?[$domain]:[$domain,'https://'.$domain.'/']);
     $selected+=(int)count($found);
     hs_set($db,'next_page',(string)($page+1)); hs_set($db,'discovery_pages',(string)($pages+1));
     hs_set($db,'phase',$selected>=$target?'scan':'discovery'); hs_set($db,'source',$endpoint);
@@ -299,6 +311,7 @@ function hs_groups(PDO $db,string $search,array $params=[]): array {
     $groups=[];
     foreach (['all'=>'1=1','review'=>"(status='review' OR EXISTS (SELECT 1 FROM redirect_hops WHERE redirect_hops.domain=results.domain AND external=1))",'ok'=>"status='ok'",'errors'=>"(status IN ('error','http_error') OR EXISTS (SELECT 1 FROM http_results WHERE http_results.domain=results.domain AND code>=400))"] as $key=>$where) {
         $args=[];
+        if (($params['issues_only']??'0')==='1') $where.=" AND (status<>'ok' OR NOT EXISTS (SELECT 1 FROM reports WHERE reports.domain=results.domain AND score IS NOT NULL AND findings=0) OR EXISTS (SELECT 1 FROM redirect_hops WHERE redirect_hops.domain=results.domain AND external=1) OR EXISTS (SELECT 1 FROM http_results WHERE http_results.domain=results.domain AND code>=400))";
         if ($search!=='') {
             $where.=" AND (domain LIKE ? ESCAPE '\\' OR current_url LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\')";
             $term='%'.str_replace(['\\','%','_'],['\\\\','\\%','\\_'],$search).'%'; $args=[$term,$term,$term];
@@ -357,9 +370,89 @@ function hs_clear_results(PDO $db,array $actor): void {
     if ($actor['role']!=='admin') throw new RuntimeException('Kun administratorer kan rydde resultater.');
     $db->beginTransaction();
     try {
-        foreach (['security_jobs','security_history','reports','redirect_hops','http_results','results'] as $table) $db->exec('DELETE FROM '.$table);
-        foreach (['running'=>'0','phase'=>'idle','checked'=>'0','last_tick'=>'0','error'=>'','notice'=>'','source'=>''] as $key=>$value) hs_set($db,$key,$value);
+        foreach (['ns_candidates','security_jobs','security_history','reports','redirect_hops','http_results','results'] as $table) $db->exec('DELETE FROM '.$table);
+        foreach (['running'=>'0','phase'=>'idle','checked'=>'0','last_tick'=>'0','error'=>'','notice'=>'','source'=>'','ns_checked'=>'0','ns_matched'=>'0','ns_errors'=>'0','ns_done'=>'0','ns_retry_domain'=>''] as $key=>$value) hs_set($db,$key,$value);
         hs_user_audit($db,(int)$actor['id'],(int)$actor['id'],'Alle scanningsresultater og sikkerhedsrapporter ryddet');
         $db->commit();
     } catch (Throwable $e) { $db->rollBack(); throw $e; }
+}
+
+function hs_ns_providers(): array { return ['one.com','simply.com','dandomain.dk','scannet2.dk','netsite.dk','azehosting.net','curanet.dk','webhosting.dk','gigahost.dk','wannafind.dk']; }
+function hs_ns_options(mixed $providers): array {
+    if (!is_array($providers) || count($providers)>10) throw new InvalidArgumentException('Vælg gyldige navneserverudbydere.');
+    foreach ($providers as $provider) if (!is_string($provider) || !in_array($provider,hs_ns_providers(),true)) throw new InvalidArgumentException('Ukendt navneserverudbyder.');
+    return array_values(array_unique($providers));
+}
+function hs_ns_selected(PDO $db): array { return hs_ns_options(json_decode(hs_get($db,'ns_providers','[]'),true)); }
+function hs_ns_match(array $records,array $providers): bool {
+    foreach ($records as $record) {
+        $host=strtolower(rtrim((string)($record['target']??''),'.'));
+        foreach ($providers as $provider) if ($host===$provider || str_ends_with($host,'.'.$provider)) return true;
+    }
+    return false;
+}
+function hs_discovery_target(PDO $db): int { $n=(int)hs_get($db,'target','50');return hs_ns_selected($db)?min(10000,max(500,$n*20)):$n; }
+function hs_discovery_count(PDO $db): int { return (int)$db->query(hs_ns_selected($db)?'SELECT COUNT(*) FROM ns_candidates':"SELECT COUNT(*) FROM results WHERE status='pending'")->fetchColumn(); }
+function hs_ns_tick(PDO $db,?callable $resolver=null,?callable $fetch=null): void {
+    $target=(int)hs_get($db,'target','50');$matched=(int)hs_get($db,'ns_matched','0');
+    $domain=$db->query('SELECT domain FROM ns_candidates ORDER BY domain LIMIT 1')->fetchColumn();
+    if ($matched >= $target || $domain===false) {
+        hs_set($db,'ns_done','1'); hs_set($db,'phase','scan'); $db->exec('DELETE FROM ns_candidates');
+        hs_set($db,'notice','NS-filter: '.$matched.' af '.$target.' ønskede domæner matchede; '.hs_get($db,'ns_checked','0').' undersøgt, '.hs_get($db,'ns_errors','0').' uden brugbart NS-svar.'.($matched<$target?' Kandidatlisten er opbrugt.':'')); return;
+    }
+    // One DNS operation per tick. No target HTTP request is made for a non-match.
+    $native=$resolver===null;
+    if (hs_get($db,'ns_retry_domain')===$domain) {
+        try { $fetch??=fn($url,$limit)=>hs_fetch($url,$limit); $records=hs_ns_doh($domain,$fetch); } catch (Throwable) { $records=false; }
+    } else {
+        $resolver??=fn($name)=>@dns_get_record($name,DNS_NS);
+        try { $records=$resolver($domain); } catch (Throwable) { $records=false; }
+        if ($native && (!$records || !is_array($records))) {
+            hs_set($db,'ns_retry_domain',$domain); hs_set($db,'phase','ns_filter');
+            hs_set($db,'notice','Det lokale NS-opslag gav intet brugbart svar. Prøver offentligt DNS-opslag via HTTPS i næste trin.');return;
+        }
+    }
+    hs_set($db,'ns_retry_domain','');
+    $valid=is_array($records) && count(array_filter($records,fn($r)=>!empty($r['target'])))>0;
+    $db->beginTransaction();
+    try {
+        hs_set($db,'ns_checked',(string)((int)hs_get($db,'ns_checked','0')+1));
+        if (!$valid) hs_set($db,'ns_errors',(string)((int)hs_get($db,'ns_errors','0')+1));
+        elseif (hs_ns_match($records,hs_ns_selected($db))) {
+            $db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')")->execute([$domain,'https://'.$domain.'/']);
+            hs_set($db,'ns_matched',(string)(++$matched));
+        }
+        $db->prepare('DELETE FROM ns_candidates WHERE domain=?')->execute([$domain]);
+        hs_set($db,'phase','ns_filter'); hs_set($db,'notice','NS-filter: '.$matched.' af '.$target.' fundet · '.hs_get($db,'ns_checked').' undersøgt · '.hs_get($db,'ns_errors').' uden brugbart NS-svar.');
+        $db->commit();
+    } catch (Throwable $e) { $db->rollBack(); throw $e; }
+}
+function hs_manual_domain(mixed $input): string {
+    if (!is_string($input) || strlen($input)>300) throw new InvalidArgumentException('Indtast ét offentligt domæne.');
+    $value=trim($input);if (!preg_match('~^https?://~i',$value)) $value='https://'.$value;
+    try { $parts=hs_url($value); } catch (Throwable) { throw new InvalidArgumentException('Indtast et gyldigt offentligt domæne, fx eksempel.dk.'); }
+    if (!in_array($parts['path']??'',['','/'],true) || isset($parts['query']) || isset($parts['fragment']) || isset(parse_url($value)['port'])) throw new InvalidArgumentException('Indtast kun domænet uden sti, port eller parametre.');
+    $host=hs_host($parts['host']);
+    foreach (['localhost','local','internal','test','invalid','example','onion'] as $suffix) if ($host===$suffix || str_ends_with($host,'.'.$suffix)) throw new InvalidArgumentException('Kun offentlige domæner tillades.');
+    return $host;
+}
+function hs_start_manual(PDO $db,string $domain): void {
+    hs_start($db,1,'0'); hs_set($db,'phase','scan');hs_set($db,'source','Manuelt indtastet domæne');
+    $db->prepare('DELETE FROM http_results WHERE domain=?')->execute([$domain]);$db->prepare('DELETE FROM redirect_hops WHERE domain=?')->execute([$domain]);
+    $db->prepare("INSERT OR REPLACE INTO results(domain,current_url,status) VALUES(?,?,'pending')")->execute([$domain,'https://'.$domain.'/']);
+}
+
+function hs_ns_doh(string $domain,callable $fetch): array|false {
+    $response=$fetch('https://dns.google/resolve?'.http_build_query(['name'=>$domain,'type'=>'NS']),65536);
+    if ($response['code']!==200 || !empty($response['truncated'])) return false;
+    $data=json_decode($response['body'],true);
+    if (!is_array($data) || ($data['Status']??-1)!==0 || !empty($data['TC'])) return false;
+    $questions=$data['Question']??[];
+    if (count($questions)!==1 || strtolower(rtrim($questions[0]['name']??'','.'))!==$domain || ($questions[0]['type']??0)!==2) return false;
+    $out=[];foreach (($data['Answer']??[]) as $r) {
+        if (($r['type']??0)!==2 || strtolower(rtrim($r['name']??'','.'))!==$domain) continue;
+        $host=strtolower(rtrim($r['data']??'','.'));
+        if (preg_match('/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/D',$host)) $out[]=['target'=>$host];
+    }
+    return $out;
 }

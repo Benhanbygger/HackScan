@@ -1,4 +1,4 @@
-# Opdatér HackScan til 0.4.2
+# Opdatér HackScan til 0.5.0
 
 ## Nyt
 
@@ -13,7 +13,7 @@
 
 1. Stop scanningen. Luk andre HackScan-faner. Deaktivér en eventuel planlagt PHP-opgave under opdateringen.
 2. Tag backup via Plesk. Bevar især `hackscan-private/data`.
-3. Åbn GitHub → `dist/HackScan-Opdatering-0.4.2.zip` → **Download raw file**.
+3. Åbn GitHub → `dist/HackScan-Opdatering-0.5.0.zip` → **Download raw file**.
 4. Upload ZIP-filen i Plesk **Files → Home directory**, hvor `httpdocs` og `hackscan-private` ligger side om side.
 5. Vælg **Extract / Udpak**, og tillad overskrivning af programfilerne. Pakken indeholder disse ni program-/assetfiler samt vejledning:
 
@@ -46,10 +46,19 @@ Der er flere offentlige trin pr. domæne, så en scanning tager længere tid end
 
 Brug fuld backup ved en eventuel tilbagerulning. En gammel programversion har ikke de nye adgangsroller og rapporter, selv om tabellerne bevares. Uploadpakken indeholder ingen konti, databaser, nøgler eller virkelige adgangskoder.
 
-## Rettelse i 0.4.2
+## Rettelse i 0.5.0
 
 Netværksfejl håndteres også på PHP/cURL-installationer uden konstanten `CURLE_PEER_FAILED_VERIFICATION`. TLS-verifikation forbliver aktiveret. Rettelsen kræver kun udskiftning af `hackscan-private/security.php`; den samlede opdateringspakke kan også bruges. Bevar eksisterende data. Start en ny scanning efter opdateringen; allerede gemte resultater bevares.
 
 ## Ryd alle resultater
 
 Administratorer kan vælge **Brugere → Ryd alle resultater** og bekræfte sletningen. Det stopper scanningen og fjerner alle scanningsresultater, rapporter og historik for alle brugere. Konti, adgangskoder, indstillinger og domæneliste bevares. Sletning kan ikke fortrydes; eksportér eventuelt CSV først.
+
+## Navneserverfiltre, manuel scanning og resultatvisning (0.5.0)
+
+- Vælg udbydere med flueben. Ingen valg betyder alle; flere valg betyder OR. Der matches kun selve udbyderdomænet eller underdomæner heraf, ikke vilkårlige delstrenge.
+- NS-opslag foretages ét pr. trin før HTTP-scanningen. Lokale DNS-fejl eller tomme svar prøves én gang via Google Public DNS over HTTPS i et separat trin. Ubrugelige svar fra begge kilder springes over med synlig tæller. Listen søges fra starttegnet, indtil det ønskede antal match er fundet eller kandidaterne er opbrugt. Det kan tage længere tid med snævre filtre.
+- Tranco-filteret undersøger alle tilgængelige kandidater fra starttegnet. Common Crawl-reserven undersøger højst 10.000 kandidater (mindst 500, ellers 20 gange målantallet) og fortsat højst 100 indekssider. Et match kan ikke garanteres. NS-domænet er ikke nødvendigvis webhosten, og filtre påvirker ikke historisk gemte resultater.
+- Feltet **Scan ét domæne** scanner et offentligt domæne uden automatisk opdagelse, startbogstav eller NS-filter. HTTP/HTTPS og www normaliseres; stier, porte, loginoplysninger, IP-adresser og interne destinationsadresser accepteres ikke. IDN skal skrives som punycode. En igangværende scanning skal stoppes først.
+- Domæner uden registrerede fund skjules som standard. **Vis også domæner uden registrerede fund** viser dem igen. Domæner med kontrolfejl eller manglende sikkerhedsvurdering bevares i visningen. Søgning og sidetal bruger filteret; statistik og CSV indeholder fortsat alle gemte resultater. Ingen fund betyder ikke dokumenteret sikkerhed.
+- Stop eller rydning annullerer også NS-køen. Eksisterende konti, adgangskoder og resultater bevares under opdatering.

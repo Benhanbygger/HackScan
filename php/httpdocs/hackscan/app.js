@@ -5,7 +5,7 @@ const canScan = root.dataset.canScan !== '0';
 const el = id => document.getElementById(id);
 const keys = ['all', 'review', 'ok', 'errors'];
 const labels = {pending:'Afventer',review:'Bør undersøges',ok:'Samme domæne',error:'Kontrolfejl',http_error:'HTTP-fejl',cancelled:'Stoppet'};
-const phases = {catalog:'Henter domæneliste',catalog_queue:'Vælger domæner fra den gemte liste',idle:'Klar til scanning',metadata:'Henter indeksoversigt',inventory:'Finder startposition',seek:'Finder startposition',discovery:'Finder danske forsider',scan:'Kontrollerer viderestillinger',done:'Scanning afsluttet',failed:'Scanning afbrudt',stopped:'Scanning stoppet'};
+const phases = {catalog:'Henter domæneliste',ns_filter:'Filtrerer navneservere',catalog_queue:'Vælger domæner fra den gemte liste',idle:'Klar til scanning',metadata:'Henter indeksoversigt',inventory:'Finder startposition',seek:'Finder startposition',discovery:'Finder danske forsider',scan:'Kontrollerer viderestillinger',done:'Scanning afsluttet',failed:'Scanning afbrudt',stopped:'Scanning stoppet'};
 let groups = {}, busy = false, timer, queuedAction = null, searchTimer, initialized = false;
 const pages = Object.fromEntries(keys.map(key => [key, 0]));
 function schedule() {
@@ -17,10 +17,12 @@ async function api(action, post = false) {
   const params = new URLSearchParams({api:action});
   if (action === 'state') {
     params.set('q', el('search').value);
+    params.set('issues_only',el('show-clean').checked?'0':'1');
     for (const key of keys) params.set('page_' + key, pages[key]);
   }
   const options = {method:post?'POST':'GET', headers:post?{'X-CSRF-Token':csrf}:{}, credentials:'same-origin'};
-  if (action === 'start') options.body = new URLSearchParams({limit:el('scan-limit').value, start_char:el('start-char').value});
+  if (action === 'start') { options.body = new URLSearchParams({limit:el('scan-limit').value, start_char:el('start-char').value}); document.querySelectorAll('#ns-filter input:checked').forEach(input=>options.body.append('providers[]',input.value)); }
+  if (action === 'manual') options.body = new URLSearchParams({domain:el('manual-domain').value});
   const response = await fetch('index.php?' + params, options);
   if (response.status === 401) { location.reload(); throw Error('Log ind igen'); }
   const data = await response.json();
@@ -95,9 +97,11 @@ async function refresh() {
   if (!initialized) {
     el('scan-limit').value = data.state.target;
     el('start-char').value = data.state.start_char;
+    document.querySelectorAll('#ns-filter input').forEach(input=>input.checked=(data.state.ns_providers||[]).includes(input.value));
     initialized = true;
   }
   el('start').disabled = el('scan-limit').disabled = el('start-char').disabled = data.state.running || !canScan;
+  document.querySelectorAll('#ns-filter input,#manual-form input,#manual-form button').forEach(input=>input.disabled=data.state.running||!canScan);
   el('stop').hidden = !data.state.running || !canScan;
   el('live-status').textContent = data.state.running ? 'Scanning aktiv' : 'Klar til scanning';
   el('live-status').classList.toggle('running', data.state.running);
@@ -129,6 +133,8 @@ async function action(name) {
   catch (e) { el('error').textContent = e.message; }
   finally { schedule(); }
 }
+el('show-clean').onchange=()=>{for(const key of keys) pages[key]=0; if(!busy){clearTimeout(timer);cycle();}};
+el('manual-form').onsubmit=event=>{event.preventDefault();if(el('manual-form').reportValidity())action('manual');};
 el('scan-form').onsubmit = event => { event.preventDefault(); if (el('scan-form').reportValidity()) action('start'); };
 el('stop').onclick = () => action('stop');
 el('search').oninput = () => {

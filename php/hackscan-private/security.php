@@ -3,6 +3,15 @@ declare(strict_types=1);
 
 function hs_security_schema(PDO $db): void {
     $db->exec('CREATE TABLE IF NOT EXISTS reports (domain TEXT PRIMARY KEY, report TEXT NOT NULL, score INTEGER, grade TEXT, assessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    if (!in_array('findings',array_column($db->query('PRAGMA table_info(reports)')->fetchAll(),'name'),true)) {
+        $db->exec('ALTER TABLE reports ADD COLUMN findings INTEGER NOT NULL DEFAULT 0');
+        $update=$db->prepare('UPDATE reports SET findings=? WHERE domain=?');
+        foreach ($db->query('SELECT domain,report FROM reports')->fetchAll() as $row) {
+            $r=json_decode($row['report'],true);$count=0;
+            foreach (($r['controls']??[]) as $control) if (($control['state']??'')==='finding') $count++;
+            $update->execute([$count,$row['domain']]);
+        }
+    }
     $db->exec('CREATE INDEX IF NOT EXISTS reports_score ON reports(score)');
     $db->exec('CREATE TABLE IF NOT EXISTS security_jobs (job_key TEXT PRIMARY KEY, kind TEXT NOT NULL, domain TEXT NOT NULL DEFAULT \'\')');
     $db->exec('CREATE TABLE IF NOT EXISTS intel (kind TEXT PRIMARY KEY, payload TEXT NOT NULL DEFAULT \'\', fetched_at INTEGER NOT NULL DEFAULT 0, attempted_at INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT \'\')');
@@ -243,7 +252,7 @@ function hs_score(array &$r): void {
 }
 function hs_report_save(PDO $db,array $r): void {
     hs_apply_intel($r,$db); hs_score($r);
-    $db->prepare('INSERT OR REPLACE INTO reports(domain,report,score,grade) VALUES(?,?,?,?)')->execute([$r['domain'],json_encode($r,JSON_INVALID_UTF8_SUBSTITUTE),$r['rating']['score'],$r['rating']['grade']]);
+    $db->prepare('INSERT OR REPLACE INTO reports(domain,report,score,grade,findings) VALUES(?,?,?,?,?)')->execute([$r['domain'],json_encode($r,JSON_INVALID_UTF8_SUBSTITUTE),$r['rating']['score'],$r['rating']['grade'],$r['rating']['findings']]);
 }
 function hs_report_get(PDO $db,string $domain): ?array {
     $q=$db->prepare('SELECT report,assessed_at FROM reports WHERE domain=?'); $q->execute([$domain]); $row=$q->fetch();
