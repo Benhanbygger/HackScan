@@ -1,4 +1,4 @@
-# Opdatér HackScan til 0.4.1
+# Opdatér HackScan til 0.4.2
 
 ## Nyt
 
@@ -13,7 +13,7 @@
 
 1. Stop scanningen. Luk andre HackScan-faner. Deaktivér en eventuel planlagt PHP-opgave under opdateringen.
 2. Tag backup via Plesk. Bevar især `hackscan-private/data`.
-3. Åbn GitHub → `dist/HackScan-Opdatering-0.4.1.zip` → **Download raw file**.
+3. Åbn GitHub → `dist/HackScan-Opdatering-0.4.2.zip` → **Download raw file**.
 4. Upload ZIP-filen i Plesk **Files → Home directory**, hvor `httpdocs` og `hackscan-private` ligger side om side.
 5. Vælg **Extract / Udpak**, og tillad overskrivning af programfilerne. Pakken indeholder disse ni program-/assetfiler samt vejledning:
 
@@ -46,6 +46,10 @@ Der er flere offentlige trin pr. domæne, så en scanning tager længere tid end
 
 Brug fuld backup ved en eventuel tilbagerulning. En gammel programversion har ikke de nye adgangsroller og rapporter, selv om tabellerne bevares. Uploadpakken indeholder ingen konti, databaser, nøgler eller virkelige adgangskoder.
 
-## Rettelse i 0.4.1
+## Rettelse i 0.4.2
 
 Netværksfejl håndteres også på PHP/cURL-installationer uden konstanten `CURLE_PEER_FAILED_VERIFICATION`. TLS-verifikation forbliver aktiveret. Rettelsen kræver kun udskiftning af `hackscan-private/security.php`; den samlede opdateringspakke kan også bruges. Bevar eksisterende data. Start en ny scanning efter opdateringen; allerede gemte resultater bevares.
+
+## Ryd alle resultater
+
+Administratorer kan vælge **Brugere → Ryd alle resultater** og bekræfte sletningen. Det stopper scanningen og fjerner alle scanningsresultater, rapporter og historik for alle brugere. Konti, adgangskoder, indstillinger og domæneliste bevares. Sletning kan ikke fortrydes; eksportér eventuelt CSV først.

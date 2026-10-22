@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.4.1';
+const HS_VERSION = '0.4.2';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
@@ -351,3 +351,15 @@ function hs_tranco_domains(string $zip): array {
 require_once __DIR__.'/security.php';
 
 require_once __DIR__.'/users.php';
+
+// Caller must hold scan.lock, just like scanner ticks and the scheduled worker.
+function hs_clear_results(PDO $db,array $actor): void {
+    if ($actor['role']!=='admin') throw new RuntimeException('Kun administratorer kan rydde resultater.');
+    $db->beginTransaction();
+    try {
+        foreach (['security_jobs','security_history','reports','redirect_hops','http_results','results'] as $table) $db->exec('DELETE FROM '.$table);
+        foreach (['running'=>'0','phase'=>'idle','checked'=>'0','last_tick'=>'0','error'=>'','notice'=>'','source'=>''] as $key=>$value) hs_set($db,$key,$value);
+        hs_user_audit($db,(int)$actor['id'],(int)$actor['id'],'Alle scanningsresultater og sikkerhedsrapporter ryddet');
+        $db->commit();
+    } catch (Throwable $e) { $db->rollBack(); throw $e; }
+}

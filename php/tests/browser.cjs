@@ -120,11 +120,27 @@ function check(condition, name) { if (!condition) throw Error(name); passed.push
   const denied=await viewerPage.request.post(url+'index.php?api=start',{headers:{'X-CSRF-Token':viewerCsrf},form:{limit:'1',start_char:'0'}});
   check(denied.status()===403,'reader cannot start scans by bypassing UI');
   check((await viewerPage.request.get(url+'index.php?api=users')).status()===403,'reader cannot access account administration API');
+  check((await viewerPage.request.post(url+'index.php?api=clear_results',{headers:{'X-CSRF-Token':viewerCsrf},form:{confirmation:'RYD ALLE RESULTATER'}})).status()===403,'reader cannot clear shared results via API');
   const readerRow=page.locator('.user-row').filter({hasText:'test-reader'});await readerRow.locator('[type=checkbox]').uncheck(); await readerRow.locator('button').click();
   await page.waitForFunction(()=>document.getElementById('admin-message').textContent.includes('opdateret'));
   check((await viewerPage.request.get(url+'index.php?api=state')).status()===401,'disabling a user revokes an existing browser session');
   await viewerContext.close();
   await page.screenshot({path:path.join(artifacts,'user-administration.png'),fullPage:true});
+  const adminCsrf=await page.locator('#administration').getAttribute('data-csrf');
+  check((await page.request.get(url+'index.php?api=clear_results')).status()===405,'clear results requires POST');
+  check((await page.request.post(url+'index.php?api=clear_results',{form:{confirmation:'RYD ALLE RESULTATER'}})).status()===403,'clear results requires valid CSRF token');
+  check((await page.request.post(url+'index.php?api=clear_results',{headers:{'X-CSRF-Token':adminCsrf},form:{confirmation:'no'}})).status()===400,'clear results requires explicit confirmation');
+  page.once('dialog',dialog=>dialog.dismiss());await page.locator('#clear-results').click();
+  check((await (await page.request.get(url+'index.php?api=state')).json()).counts.review>0,'cancelling deletion retains results');
+  const activeScan=spawnSync(php,['-r',"require $argv[1].'/core.php';$db=hs_db($argv[1].'/data/hackscan.sqlite3');hs_set($db,'running','1');hs_set($db,'phase','scan');hs_set($db,'checked','16');$db->exec(\"INSERT OR IGNORE INTO security_jobs(job_key,kind,domain) VALUES('dns:pending.dk','dns','pending.dk')\");",path.join(temp,'hackscan-private')],{encoding:'utf8'});
+  if(activeScan.status!==0)throw Error(activeScan.stderr);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#clear-results').click();
+  await page.waitForFunction(()=>document.getElementById('admin-message').textContent.includes('Alle resultater er ryddet'));
+  const cleared=await (await page.request.get(url+'index.php?api=state')).json();
+  check(Object.keys(cleared.counts).length===0 && !cleared.state.running && cleared.state.checked===0 && cleared.state.security_pending===0 && Number(cleared.security.assessed)===0,'confirmed clear resets dashboard and stops scanning');
+  check((await (await page.request.get(url+'index.php?api=users')).json()).users.length===2,'clearing results preserves accounts and active administrator login');
+  const storage=spawnSync(php,['-r',`require $argv[1].'/core.php';$db=hs_db($argv[1].'/data/hackscan.sqlite3');foreach(['results','reports','security_history','security_jobs','redirect_hops','http_results'] as $table){if((int)$db->query('SELECT COUNT(*) FROM '.$table)->fetchColumn())exit(1);}if(!$db->query("SELECT COUNT(*) FROM user_audit WHERE event LIKE 'Alle scanningsresultater%'")->fetchColumn())exit(2);`,path.join(temp,'hackscan-private')],{encoding:'utf8'});
+  check(storage.status===0,'clearing removes report history and HTTP metadata and retains audit event');
   check(errors.length===0,'dashboard, detail and administration have no browser JavaScript errors');
 
   console.log(`\n${passed.length} browser checks passed.`);

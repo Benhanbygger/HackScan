@@ -26,3 +26,10 @@ async function loadUsers(){
 }
 document.querySelector('#create-user').onsubmit=async event=>{event.preventDefault();const form=event.target;const button=form.querySelector('button');button.disabled=true;try{await adminApi('user_create',{username:document.querySelector('#new-username').value,password:document.querySelector('#new-password').value,role:document.querySelector('#new-role').value});form.reset();msg.textContent='Brugeren er oprettet. Adgangskoden vises eller gemmes ikke i klartekst.';await loadUsers();}catch(e){msg.textContent=e.message;}finally{button.disabled=false;}};
 loadUsers().catch(e=>msg.textContent=e.message);
+
+document.querySelector('#clear-results').onclick=async event=>{
+ if(!window.confirm('Ryd alle resultater? Dette stopper scanningen og sletter alle resultater, sikkerhedsrapporter og historik for alle brugere. Handlingen kan ikke fortrydes.'))return;
+ const button=event.currentTarget;button.disabled=true;
+ try{await adminApi('clear_results',{confirmation:'RYD ALLE RESULTATER'});msg.textContent='Alle resultater er ryddet. Brugere og indstillinger er bevaret.';await loadUsers();}
+ catch(e){msg.textContent=e.message;}finally{button.disabled=false;}
+};

@@ -101,6 +101,8 @@ if (isset($_GET['domain']) && is_string($_GET['domain']) && !isset($_GET['api'])
 $action=$_GET['api']??'';
 if ($action!=='') {
     if (!in_array($action,['state','export','users'],true) && !$post) hs_json(['error'=>'Brug POST'],405);
+    if ($action==='clear_results' && $currentUser['role']!=='admin') hs_json(['error'=>'Kun administratorer kan rydde resultater.'],403);
+    if ($action==='clear_results' && ($_POST['confirmation']??'')!=='RYD ALLE RESULTATER') hs_json(['error'=>'Bekræft sletningen først.'],400);
     if (!$canScan && in_array($action,['start','stop','tick','reassess'],true)) hs_json(['error'=>'Din konto har kun læseadgang.'],403);
     if (in_array($action,['users','user_create','user_update'],true)) {
         if ($currentUser['role']!=='admin') hs_json(['error'=>'Kun administratorer har adgang.'],403);
@@ -128,11 +130,13 @@ if ($action!=='') {
         try { hs_options($_POST['limit']??50,$_POST['start_char']??'0'); }
         catch (InvalidArgumentException $e) { hs_json(['error'=>$e->getMessage()],400); }
     }
-    if (in_array($action,['start','tick','stop','reassess'],true)) {
+    if (in_array($action,['start','tick','stop','reassess','clear_results'],true)) {
         $lock=fopen($data.'/scan.lock','c');
         if (!$lock || !flock($lock,LOCK_EX|LOCK_NB)) hs_json(['error'=>'En kontrol er i gang. Prøv igen om lidt.'],409);
         try {
-            if ($action==='start') {
+            if ($action==='clear_results') {
+                hs_clear_results($db,$currentUser);
+            } elseif ($action==='start') {
                 if (hs_get($db,'running')==='1') hs_json(['error'=>'En scanning er allerede aktiv.'],409);
                 hs_start($db,$_POST['limit']??50,$_POST['start_char']??'0');
             } elseif ($action==='reassess') {

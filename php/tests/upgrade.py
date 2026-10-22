@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='hackscan-upgrade-') as tmp:
   with sqlite3.connect(database) as db:
    old_hash=db.execute("SELECT value FROM settings WHERE name='password_hash'").fetchone()[0]
    db.execute("INSERT INTO results(domain,current_url,status,detail) VALUES('legacy.dk','https://legacy.dk/','http_error','HTTP 404')")
-  package=repo/'dist/HackScan-Opdatering-0.4.1.zip'
+  package=repo/'dist/HackScan-Opdatering-0.4.2.zip'
   with zipfile.ZipFile(package) as archive:
    assert not any('data/' in n or 'setup-key' in n for n in archive.namelist())
    archive.extractall(root)
