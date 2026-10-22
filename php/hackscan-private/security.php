@@ -335,6 +335,7 @@ function hs_security_job(PDO $db,callable $fetch,?callable $dns=null): bool {
 function hs_network_report(PDO $db,string $domain,string $url,Throwable $error): void {
     $r=hs_new_report($domain,hs_safe_url($url));
     $r['limitations'][]='HTTP-svaret kunne ikke sikkerhedsvurderes: '.substr($error->getMessage(),0,200);
-    if ($error instanceof HSNetworkError && in_array($error->getCode(),[CURLE_PEER_FAILED_VERIFICATION,CURLE_SSL_CERTPROBLEM],true)) hs_check($r,'tls','finding','TLS-certifikatet kunne ikke verificeres af scanneren. Årsagen kan være certifikatkæde, værtsnavn eller lokal CA-konfiguration.','Kontrollér certifikat, værtsnavn, udløb og certifikatkæde.','medium');
+    // Stable libcurl error numbers: PHP builds may omit the symbolic constant for code 60.
+    if ($error instanceof HSNetworkError && in_array($error->getCode(),[60,58],true)) hs_check($r,'tls','finding','TLS-certifikatet kunne ikke verificeres af scanneren. Årsagen kan være certifikatkæde, værtsnavn eller lokal CA-konfiguration.','Kontrollér certifikat, værtsnavn, udløb og certifikatkæde.','medium');
     hs_report_save($db,$r);
 }

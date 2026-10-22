@@ -23,6 +23,13 @@ $secret='DO_NOT_PERSIST_COOKIE_VALUE';
 $rich='<html><head><title>Eksempel</title><meta name="generator" content="WordPress 6.1.0"><script src="https://cdn.example.com/jquery-3.4.1.min.js?token='.$secret.'"></script><script>window.location="https://other.dk/";</script></head><body><input value="'.$secret.'"><iframe src="https://other.dk/" width="0"></iframe></body></html>';
 $r=hs_analyze('example.dk','https://example.dk/',page($rich,['x-powered-by'=>['PHP/7.4.33'],'server'=>['Apache/2.4.1'],'set-cookie'=>['session='.$secret.'; Path=/']]));
 $db=hs_db(':memory:');
+foreach ([60,58,28,6] as $code) {
+    hs_network_report($db,'network.dk','https://network.dk/',new HSNetworkError('Test network failure',$code));
+    $network=hs_report_get($db,'network.dk');
+    ok(($network['controls']['tls']['state']==='finding')===in_array($code,[60,58],true),'network error '.$code.' handled without optional cURL constants');
+    ok($network['rating']['score']===null,'network error '.$code.' remains ungraded');
+}
+
 $db->prepare('INSERT INTO intel(kind,payload,fetched_at) VALUES(?,?,?)')->execute(['wordpress',json_encode(['version'=>'6.8.3']),time()]);
 $db->prepare('INSERT INTO intel(kind,payload,fetched_at) VALUES(?,?,?)')->execute(['kev',json_encode(['cves'=>['CVE-2020-11022']]),time()]);
 hs_apply_intel($r,$db);hs_score($r);

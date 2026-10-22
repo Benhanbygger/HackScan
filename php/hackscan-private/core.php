@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.4.0';
+const HS_VERSION = '0.4.1';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
