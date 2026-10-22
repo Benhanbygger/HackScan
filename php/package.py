@@ -9,10 +9,10 @@ out.mkdir(exist_ok=True)
 public = source / 'httpdocs'
 private = source / 'hackscan-private'
 version = re.search(r"const HS_VERSION = '([^']+)'", (private / 'core.php').read_text()).group(1)
-full = [source / 'UPLOAD-VEJLEDNING.md', source / 'OPDATERING.md', public, private]
+full = [source / 'UPLOAD-VEJLEDNING.md', source / 'OPDATERING.md', source / 'SECURITY.md', public, private]
 full += sorted(public.rglob('*')) + sorted(private.rglob('*'))
-upgrade = [source / 'OPDATERING.md', private, public, public / 'hackscan',
-           private / 'app.php', private / 'core.php', public / 'hackscan/app.js', public / 'hackscan/style.css']
+upgrade = [source / 'OPDATERING.md', source / 'SECURITY.md', private, public, public / 'hackscan',
+           private / 'app.php', private / 'core.php', private / 'security.php', private / 'details.php', private / 'users.php', public / 'hackscan/app.js', public / 'hackscan/detail.js', public / 'hackscan/admin.js', public / 'hackscan/style.css']
 for name, paths in [('HackScan-Plesk.zip', full), (f'HackScan-Opdatering-{version}.zip', upgrade)]:
     target = out / name
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:

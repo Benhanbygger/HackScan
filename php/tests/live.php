@@ -12,5 +12,10 @@ try {
     for ($i=0;$i<36 && hs_get($db,'running')==='1';$i++) { hs_tick($db); sleep(1); }
     foreach ($db->query('SELECT domain,current_url,status,detail FROM results ORDER BY domain') as $row) echo json_encode($row,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n";
     echo 'Completed checks: '.hs_get($db,'checked')."\n";
+    foreach ($db->query('SELECT domain FROM reports') as $row) {
+        $report=hs_report_get($db,$row['domain']);
+        echo 'Security report: '.$row['domain'].' · grade '.($report['rating']['grade']??'unassessed').' · observations '.$report['rating']['checked'].'/'.$report['rating']['total'].' · planned steps '.($report['complete']?'complete':'incomplete')."\n";
+        foreach ($report['intel']??[] as $kind=>$meta) echo 'Intel '.$kind.': '.($meta['updated_at']??'unavailable').($meta['error']!==''?' ('.$meta['error'].')':'')."\n";
+    }
     if (hs_get($db,'running')==='1') throw new RuntimeException('Scan did not finish');
 } catch (Throwable $e) { fwrite(STDERR,$e->getMessage()."\n"); exit(1); }

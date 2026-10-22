@@ -1,6 +1,7 @@
 'use strict';
 const root = document.querySelector('#app');
 const csrf = root.dataset.csrf;
+const canScan = root.dataset.canScan !== '0';
 const el = id => document.getElementById(id);
 const keys = ['all', 'review', 'ok', 'errors'];
 const labels = {pending:'Afventer',review:'Bør undersøges',ok:'Samme domæne',error:'Kontrolfejl',http_error:'HTTP-fejl',cancelled:'Stoppet'};
@@ -37,16 +38,27 @@ function renderGroup(key) {
   const body = el('rows-' + key); body.replaceChildren();
   for (const row of group.rows) {
     const tr = document.createElement('tr');
-    const domain = cell(row.domain, 'domain-cell');
+    const domain = document.createElement('td'); domain.className = 'domain-cell';
+    const reportLink = document.createElement('a'); reportLink.href = 'index.php?domain=' + encodeURIComponent(row.domain); reportLink.textContent = row.domain; reportLink.className = 'domain-link';
+    const visit = document.createElement('a'); visit.href = 'https://' + row.domain + '/'; visit.target = '_blank'; visit.rel = 'noopener noreferrer'; visit.className = 'visit-link'; visit.textContent = '↗'; visit.setAttribute('aria-label', 'Åbn ' + row.domain + ' i ny fane');
+    domain.append(reportLink, visit);
     const time = document.createElement('small'); time.textContent = row.checked_at + ' UTC'; domain.append(time);
-    const destination = cell(row.current_url, 'url-cell');
+    const destination = document.createElement('td'); destination.className = 'url-cell';
+    const destinationUrl = row.redirect_url || row.current_url;
+    try { const parsed = new URL(destinationUrl); if (!['http:','https:'].includes(parsed.protocol)) throw Error(); const link = document.createElement('a'); link.href = parsed.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = destinationUrl; if (row.redirect_url || parsed.hostname.toLowerCase().replace(/^www\./,'') !== row.domain.toLowerCase().replace(/^www\./,'')) link.className = 'external-redirect'; else if (Number(row.http_code)>=400) link.className = 'http-failure'; destination.append(link); } catch { destination.textContent = destinationUrl; }
+    const codes = document.createElement('td'); codes.className = 'http-code-cell';
+    if (row.redirect_code) { const code = document.createElement('span'); code.className = 'http-code-badge'; code.textContent = row.redirect_code; code.title = 'HTTP-kode for redirect uden for domænet'; codes.append(code); }
+    if (Number(row.http_code)>=400) { const code = document.createElement('span'); code.className = 'http-code-badge'; code.textContent = row.http_code; code.title = 'HTTP-fejlkode for slutmålet'; codes.append(code); }
+    if (!codes.children.length) codes.textContent = '—';
     const status = document.createElement('td');
-    const badge = document.createElement('span'); badge.className = 'status-badge ' + (row.status==='http_error'?'error':row.status); badge.textContent = labels[row.status] || row.status;
-    const detail = document.createElement('small'); detail.textContent = row.detail;
-    status.append(badge, detail); tr.append(domain, destination, status); body.append(tr);
+    const badge = document.createElement('span'); badge.className = 'status-badge ' + ((row.status==='http_error' || Number(row.http_code)>=400)?'error':row.status); badge.textContent = labels[row.status] || row.status;
+    const detail = document.createElement('small'); detail.textContent = row.detail; if (Number(row.http_code)>=400) detail.className = 'http-failure';
+    const grade = document.createElement('a'); grade.href = reportLink.href; grade.className = 'score-link';
+    grade.textContent = row.security_grade ? `${row.status==='pending'?'Seneste: ':''}${row.security_grade} · ${row.security_score}/100 · foreløbig` : 'Sikkerhed: ikke vurderet';
+    status.append(badge, detail, grade); tr.append(domain, destination, status, codes); body.append(tr);
   }
   if (!body.children.length) {
-    const tr = document.createElement('tr'); const td = cell(el('search').value ? 'Ingen resultater matcher søgningen.' : 'Ingen resultater i denne kategori endnu.', 'empty-cell'); td.colSpan = 3; tr.append(td); body.append(tr);
+    const tr = document.createElement('tr'); const td = cell(el('search').value ? 'Ingen resultater matcher søgningen.' : 'Ingen resultater i denne kategori endnu.', 'empty-cell'); td.colSpan = 4; tr.append(td); body.append(tr);
   }
   el('count-' + key).textContent = group.total.toLocaleString('da-DK');
   const from = group.total ? group.page * 8 + 1 : 0;
@@ -85,15 +97,16 @@ async function refresh() {
     el('start-char').value = data.state.start_char;
     initialized = true;
   }
-  el('start').disabled = el('scan-limit').disabled = el('start-char').disabled = data.state.running;
-  el('stop').hidden = !data.state.running;
+  el('start').disabled = el('scan-limit').disabled = el('start-char').disabled = data.state.running || !canScan;
+  el('stop').hidden = !data.state.running || !canScan;
   el('live-status').textContent = data.state.running ? 'Scanning aktiv' : 'Klar til scanning';
   el('live-status').classList.toggle('running', data.state.running);
   const checking = ['scan', 'done', 'stopped', 'failed'].includes(data.state.phase);
   const found = data.state.pending + data.state.checked;
   const goal = checking && !['stopped', 'failed'].includes(data.state.phase) ? found || data.state.target : data.state.target;
   const value = checking ? data.state.checked : data.state.pending;
-  el('state').textContent = `${phases[data.state.phase] || data.state.phase}${checking ? ' · ' + data.state.checked + ' kontrolleret' : ''}`;
+  el('state').textContent = `${phases[data.state.phase] || data.state.phase}${checking ? ' · ' + data.state.checked + ' HTTP-kontrolleret' : ''}${data.state.security_pending ? ' · sikkerhedsopslag afventer' : ''}`;
+  if (el('security-summary')) el('security-summary').textContent = `${data.security.assessed} domæner har en foreløbig sikkerhedskarakter${data.security.average !== null ? ' · gennemsnit ' + data.security.average + '/100' : ''}. Ikke udførte kontroller tæller ikke som beståede. Klik på et domæne for fund og forbedringsforslag.`;
   el('progress-label').textContent = `${value.toLocaleString('da-DK')} / ${goal.toLocaleString('da-DK')}`;
   el('progress').value = goal ? Math.min(100, 100 * value / goal) : 0;
   el('error').textContent = data.state.error;
@@ -104,7 +117,7 @@ async function refresh() {
 async function cycle() {
   if (busy) return;
   busy = true;
-  try { if (await refresh()) { await api('tick', true); await refresh(); } }
+  try { if (await refresh() && canScan) { await api('tick', true); await refresh(); } }
   catch (e) { el('error').textContent = e.message; }
   finally { schedule(); }
 }

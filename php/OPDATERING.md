@@ -1,49 +1,47 @@
-# Opdatér den eksisterende HackScan til 0.3.1
+# Opdatér HackScan til 0.4.0
 
-Denne opdatering bevarer din nuværende konto, adgangskode og database. Du skal **ikke** oprette en ny engangsnøgle eller slette mapper.
+## Nyt
 
-## Rettelsen i 0.3.1
+- Klik på et domænenavn for en sikkerhedsrapport. Den separate **↗**-genvej åbner hjemmesiden i en ny fane.
+- Foreløbig sikkerhedskarakter A–F og 0–100, 45 eksplicitte kontrolposter, evidens, observationssikkerhed og forbedringsforslag i tre klasser: sårbarhed, kompromitteringsindikator og risikofaktor.
+- Ukendt / ikke udført er tydeligt og tæller ikke som bestået. Læs [SECURITY.md](SECURITY.md) for præcis dækning og begrænsninger.
+- Eksterne redirectmål er røde. Faktiske redirectkoder og HTTP-fejlkoder står i deres egen kolonne med hvid tekst på rød baggrund. WWW/ikke-WWW og HTTP/HTTPS alene tælles ikke som eksterne domæneskift. Gamle redirectkoder kan ikke gættes og kræver en ny kontrol; historiske præcise “HTTP 404”-svar kan genbruges.
+- **Brugere** i venstremenuen giver administratorer mulighed for at oprette personlige konti med rollerne administrator, bruger eller læser. Konti kan deaktiveres, roller ændres og adgangskoder nulstilles. Gamle sessioner afsluttes ved ændringer.
+- Eksisterende domæneopdagelse med Tranco-cache og Common Crawl-reserve bevares.
 
-Fejlen **Kunne ikke læse indeksstørrelsen (HTTP 504)** kommer fra Common Crawl-opslaget, ikke SSH-indstillingen `/bin/bash`.
+## Upload i Plesk
 
-Scanneren henter nu automatisk Trancos offentlige top-1-million-liste, udvælger primære `.dk`-domæner, og gemmer dem privat i SQLite. Starttegn og antal vælges fra den gemte, sorterede liste uden opslag efter Common Crawls indeksstørrelse. Den første livehentning indeholdt 2.402 .dk-domæner; tallet kan ændre sig dagligt, og listen dækker ikke alle danske hjemmesider.
-
-Listen genbruges i 24 timer. Ved mislykket opdatering bevares en ældre, valideret liste. Hvis ingen liste findes og Tranco fejler, forsøges Common Crawl som reserve. Ingen ekstern datakilde kan garanteres tilgængelig. M betyder fortsat **M og frem**, ikke kun M-domæner. Ved færre domæner end ønsket vises det faktiske antal.
-
-PHP's almindelige zlib-understøttelse bruges til CSV-arkivet; den valgfrie ZIP-udvidelse kræves ikke. ZIP-struktur, udpakket størrelse og CRC kontrolleres, og arkivet skrives aldrig ud som filer. Parserens målte maksimale hukommelsesforbrug ved live-listen var under 70 MB, inden for serverens 128 MB.
-
-## Dashboardet fra 0.3.0
-
-- Lyst dashboard med venstremenu, lille skjoldlogo ved HackScan-navnet og lilla detaljer.
-- Fire resultatgrupper vises samtidig: **Alle domæner**, **Bør undersøges**, **Samme domæne** og **Fejl**. Hver gruppe har sin egen sideinddeling.
-- Søgning på tværs af alle gemte resultater. Kort og diagram viser de samlede, faktiske statusantal; søgningen filtrerer tabellerne.
-- Vælg **1–10.000 domæner** pr. scanning.
-- Vælg **0–9 eller A–Z** som alfabetisk startpunkt. M betyder **fra M og frem**, ikke kun navne, som begynder med M. `www` ignoreres. Nye opslag tager udgangspunkt i primære .dk-domæner; gamle resultater bevares.
-- Startposition og antal findes lokalt i Tranco-listen. Hvis Common Crawl bruges som reserve, kræves stadig eksterne indeksopslag.
-- Antallet er et mål: ingen opfundne resultater, hvis Common Crawl ikke kan levere nok. Eventuelle mangler eller fejl vises. Højst 100 indekssider undersøges i en scanning.
-- Midlertidige netværksfejl får op til to genforsøg med ventetid, før en reservekilde forsøges. Delvist fundne domæner bevares og kontrolleres, også hvis resten af søgningen fejler.
-
-## Upload uden SSH og uden Git-deployment
-
-1. Stop en igangværende scanning, og luk andre faner med HackScan. Hvis du har oprettet en planlagt opgave i Plesk, så deaktivér den under opdateringen.
-2. Tag en backup via Plesk. Bevar især `hackscan-private/data`.
-3. Hent **HackScan-Opdatering-0.3.1.zip** fra repositoryets `dist`-mappe på GitHub med **Download raw file**.
-4. I Plesk **Files**, gå til **Home directory**, hvor `httpdocs` og `hackscan-private` ligger side om side.
-5. Upload ZIP-filen og vælg **Extract / Udpak**. Tillad overskrivning af de fire programfiler i pakken:
+1. Stop scanningen. Luk andre HackScan-faner. Deaktivér en eventuel planlagt PHP-opgave under opdateringen.
+2. Tag backup via Plesk. Bevar især `hackscan-private/data`.
+3. Åbn GitHub → `dist/HackScan-Opdatering-0.4.0.zip` → **Download raw file**.
+4. Upload ZIP-filen i Plesk **Files → Home directory**, hvor `httpdocs` og `hackscan-private` ligger side om side.
+5. Vælg **Extract / Udpak**, og tillad overskrivning af programfilerne. Pakken indeholder disse ni program-/assetfiler samt vejledning:
 
    ```
    hackscan-private/app.php
    hackscan-private/core.php
+   hackscan-private/security.php
+   hackscan-private/details.php
+   hackscan-private/users.php
    httpdocs/hackscan/app.js
+   httpdocs/hackscan/detail.js
+   httpdocs/hackscan/admin.js
    httpdocs/hackscan/style.css
    ```
 
-6. Slet den uploadede ZIP-fil. Slet ikke databasen, `data`-mappen eller de øvrige mapper.
-7. Åbn `https://produktion01.say-it.dk/hackscan/` igen, og genindlæs. Du bruger samme login. CSS og JavaScript har nye versionsnumre, så de gamle filer ikke genbruges fra browserens cache.
-8. Test med et lille antal, fx **5**, og et starttegn. Kontrollér det faktiske resultat og eventuelle beskeder om Common Crawl. Aktivér din eventuelle planlagte opgave igen.
+6. **Slet ikke data-mappen, databasen eller eksisterende filer manuelt. Opret ingen ny engangsnøgle.** Nye tabeller oprettes automatisk uden at nulstille resultater eller adgangskode.
+7. Åbn `https://produktion01.say-it.dk/hackscan/` igen. Log ind med brugernavnet **admin** og din hidtidige adgangskode. Andre brugeradgange oprettes herefter under **Brugere**.
+8. Genindlæs hårdt, hvis browseren viser gammelt design. CSS/JS har nye versionsnumre. Hvis PHP stadig kører gammel kode, kontrollér Plesks OPcache-indstilling; upload ikke ukritisk filerne til en anden mappe.
+9. Test med et lille antal, fx 1–5 domæner, eller åbn en gammel rapport og klik **Kontrollér domænet igen**. Lad dashboardet stå åbent, indtil de offentlige sikkerheds- og DNS-trin også er afsluttet.
+10. Kontrollér, at WWW-normalisering ikke markeres som ekstern redirect; at faktiske HTTP-fejlkoder vises særskilt; og at en ny læserkonto ikke kan starte scanninger eller administrere brugere.
+11. Genaktivér eventuel planlagt PHP-opgave og slet ZIP-filen fra serveren.
 
-Hvis noget går galt, kan de fire gamle programfiler gendannes fra backup. Databasen får en ekstra tabel med opdagede domæner. Eksisterende konti og resultater slettes ikke. Hvis de gamle programfiler gendannes, ignorerer de den ekstra tabel.
+Alle gamle domæner og resultater bevares, men de får **ikke** automatisk en sikkerhedskarakter uden en ny scanning. En gammel score erstatter ikke en ny vurdering, mens en genkontrol er i gang.
 
-Den fulde `HackScan-Plesk.zip` er også opdateret, men til din eksisterende installation er opdateringspakken nok. Den indeholder **ingen** konti, nøgler eller databaser.
+PHP 8.4, cURL, PDO SQLite og zlib er fortsat nok. OpenSSL-funktioner bruges til certifikatfingeraftryk, når de findes; TLS-verifikation i cURL bevares altid. Ingen Composer, Python, browser-runtime eller SSH kræves på Plesk-serveren.
 
-Scanneren følger fortsat kun HTTP-viderestillinger. En ændret domæneadresse beviser ikke hacking.
+Scanningen kontakter derudover `api.wordpress.org`, `www.cisa.gov` og ved behov den officielle CISA-spejling på `raw.githubusercontent.com`. Kun offentlige sikkerhedsdata hentes; mål-URL'er sendes ikke til disse feeds. Feedfejl gør de afhængige kontroller ukendte og stopper ikke øvrige kontroller.
+
+Der er flere offentlige trin pr. domæne, så en scanning tager længere tid end en ren redirect-kontrol. Et trin foretager højst ét HTTP-opslag (to ved initial HTTP-fallback), eller en afgrænset DNS-del, så PHP ikke skal køre en hel scanning i én forespørgsel.
+
+Brug fuld backup ved en eventuel tilbagerulning. En gammel programversion har ikke de nye adgangsroller og rapporter, selv om tabellerne bevares. Uploadpakken indeholder ingen konti, databaser, nøgler eller virkelige adgangskoder.

@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const HS_VERSION = '0.3.1';
+const HS_VERSION = '0.4.0';
 class HSNetworkError extends RuntimeException {}
 
 function hs_db(string $path): PDO {
@@ -11,6 +11,10 @@ function hs_db(string $path): PDO {
     $db->exec('CREATE TABLE IF NOT EXISTS results (domain TEXT PRIMARY KEY, current_url TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT \'\', hops INTEGER NOT NULL DEFAULT 0, chain TEXT NOT NULL DEFAULT \'[]\', checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
     $db->exec('CREATE TABLE IF NOT EXISTS domains (domain TEXT PRIMARY KEY)');
     $db->exec('CREATE TABLE IF NOT EXISTS attempts (at INTEGER NOT NULL)');
+    hs_security_schema($db); hs_users_schema($db);
+    $db->exec('CREATE TABLE IF NOT EXISTS redirect_hops (domain TEXT NOT NULL, seq INTEGER NOT NULL, from_url TEXT NOT NULL, to_url TEXT NOT NULL, code INTEGER NOT NULL, external INTEGER NOT NULL, PRIMARY KEY(domain,seq))');
+    $db->exec('CREATE TABLE IF NOT EXISTS http_results (domain TEXT PRIMARY KEY, code INTEGER NOT NULL)');
+    $db->exec("INSERT OR IGNORE INTO http_results(domain,code) SELECT domain,CAST(substr(detail,6,3) AS INTEGER) FROM results WHERE detail GLOB 'HTTP [1-5][0-9][0-9]' AND length(detail)=8");
     return $db;
 }
 function hs_get(PDO $db, string $key, string $default = ''): string {
@@ -57,16 +61,18 @@ function hs_resolve(string $host): string {
 function hs_fetch(string $url, int $limit=65536, ?callable $consumer=null): array {
     $p=hs_url($url); $ip=hs_resolve($p['host']);
     $target=str_contains($ip,':')?'['.$ip.']':$ip;
-    $ch=curl_init($url); $body=''; $location=null; $bytes=0; $stopped=false;
+    $ch=curl_init($url); $body=''; $location=null; $bytes=0; $stopped=false; $headers=[]; $headerBytes=0;
     curl_setopt_array($ch,[
-        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>(in_array($p['host'],['index.commoncrawl.org','tranco-list.eu'],true)?20:12),
-        CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2,
+        CURLOPT_FOLLOWLOCATION=>false, CURLOPT_CONNECTTIMEOUT=>4, CURLOPT_TIMEOUT=>(in_array($p['host'],['index.commoncrawl.org','tranco-list.eu','api.wordpress.org','www.cisa.gov','raw.githubusercontent.com'],true)?20:12),
+        CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2, CURLOPT_CERTINFO=>true,
         CURLOPT_PROTOCOLS=>CURLPROTO_HTTP|CURLPROTO_HTTPS,
         CURLOPT_USERAGENT=>'HackScan/'.HS_VERSION.' (passive homepage redirect check)',
         CURLOPT_HTTPHEADER=>['Accept: application/json, text/html;q=0.9, */*;q=0.5'],
         CURLOPT_CONNECT_TO=>[$p['host'].':'.$p['port'].':'.$target.':'.$p['port']],
-        CURLOPT_HEADERFUNCTION=>function($ch,$line) use (&$location) {
-            if (str_starts_with($line,'HTTP/')) $location=null;
+        CURLOPT_HEADERFUNCTION=>function($ch,$line) use (&$location,&$headers,&$headerBytes) {
+            $headerBytes+=strlen($line); if ($headerBytes>65536) return 0;
+            if (str_starts_with($line,'HTTP/')) { $location=null; $headers=[]; }
+            if (str_contains($line,':')) { [$key,$value]=explode(':',$line,2); $key=strtolower(trim($key)); if (preg_match('/^[a-z0-9-]+$/D',$key)) $headers[$key][]=trim($value); }
             if (stripos($line,'Location:')===0) $location=trim(substr($line,9));
             return strlen($line);
         },
@@ -79,9 +85,11 @@ function hs_fetch(string $url, int $limit=65536, ?callable $consumer=null): arra
             return strlen($chunk);
         }
     ]);
-    $ok=curl_exec($ch); $error=curl_error($ch); $errno=curl_errno($ch); $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE); curl_close($ch);
+    $ok=curl_exec($ch); $error=curl_error($ch); $errno=curl_errno($ch); $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE); $certs=curl_getinfo($ch,CURLINFO_CERTINFO); $tls=[];
+    if (!empty($certs[0]['Cert']) && function_exists('openssl_x509_parse')) { $cert=@openssl_x509_parse($certs[0]['Cert']); if ($cert) $tls=['valid_from'=>$cert['validFrom_time_t']??null,'valid_until'=>$cert['validTo_time_t']??null,'fingerprint'=>openssl_x509_fingerprint($certs[0]['Cert'],'sha256')]; }
+    curl_close($ch);
     if ($ok===false && !($stopped && $errno===CURLE_WRITE_ERROR)) throw new HSNetworkError('Netværksfejl: '.$error,$errno);
-    return ['code'=>$code,'location'=>$location,'body'=>$body,'truncated'=>$stopped,'empty'=>$bytes===0];
+    return ['code'=>$code,'location'=>$location,'body'=>$body,'truncated'=>$stopped,'empty'=>$bytes===0,'headers'=>$headers,'tls'=>$tls];
 }
 function hs_join(string $base,string $target): string {
     $target=trim($target);
@@ -110,6 +118,7 @@ function hs_start(PDO $db, mixed $limit=50, mixed $start='0'): void {
     [$limit,$start]=hs_options($limit,$start);
     hs_set($db,'target',(string)$limit); hs_set($db,'start_char',$start);
     hs_set($db,'next_page','0'); hs_set($db,'seek_steps','0'); hs_set($db,'discovery_pages','0'); hs_set($db,'retry_count','0'); hs_set($db,'retry_after','0');
+    $db->exec('DELETE FROM security_jobs');
     $db->exec("DELETE FROM results WHERE status='pending'");
     hs_set($db,'phase',((int)hs_get($db,'catalog_timestamp','0')>time()-86400 && (int)$db->query('SELECT COUNT(*) FROM domains')->fetchColumn()>0)?'catalog_queue':'catalog'); hs_set($db,'error',''); hs_set($db,'checked','0');
     hs_set($db,'index_attempt','0'); hs_set($db,'notice',''); hs_set($db,'running','1');
@@ -164,14 +173,16 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
         }
         return;
     }
+    if (hs_security_job($db,$fetch)) return;
     $row=$db->query("SELECT * FROM results WHERE status='pending' ORDER BY domain LIMIT 1")->fetch();
     if (!$row) { hs_set($db,'running','0'); hs_set($db,'phase','done'); return; }
+    if ((int)$row['hops']===0 && $row['chain']==='[]') { $db->prepare('DELETE FROM redirect_hops WHERE domain=?')->execute([$row['domain']]); $db->prepare('DELETE FROM http_results WHERE domain=?')->execute([$row['domain']]); }
     $url=$row['current_url']; $status='pending'; $detail=''; $hops=(int)$row['hops']; $chain=json_decode($row['chain'],true);
     try {
-        try { $r=$fetch($url,16384); }
+        try { $r=$fetch($url,262144); }
         catch (Throwable $e) {
             if ($hops===0 && str_starts_with($url,'https://') && $e instanceof HSNetworkError && in_array($e->getCode(),[CURLE_COULDNT_CONNECT,CURLE_OPERATION_TIMEDOUT],true)) {
-                $url='http://'.$row['domain'].'/'; $r=$fetch($url,16384);
+                $url='http://'.$row['domain'].'/'; $r=$fetch($url,262144);
             } else throw $e;
         }
         $chain[]=$url;
@@ -179,10 +190,11 @@ function hs_tick(PDO $db, ?callable $fetch=null): void {
             $next=hs_join($url,$r['location']); hs_url($next); $next=preg_replace('/#.*$/','',$next);
             if (in_array($next,$chain,true)) throw new RuntimeException('Viderestillingsløkke');
             if ($hops>=10) throw new RuntimeException('Mere end 10 viderestillinger');
+            $db->prepare('INSERT OR REPLACE INTO redirect_hops(domain,seq,from_url,to_url,code,external) VALUES(?,?,?,?,?,?)')->execute([$row['domain'],$hops,hs_safe_url($url),hs_safe_url($next),$r['code'],hs_host(parse_url($next,PHP_URL_HOST)??'')!==hs_host($row['domain'])?1:0]);
             $url=$next; $hops++; $detail='HTTP '.$r['code'].' → næste hop';
-        } else { $status=hs_outcome($row['domain'],$url,$r['code']); $detail='HTTP '.$r['code']; }
+        } else { $db->prepare('INSERT OR REPLACE INTO http_results(domain,code) VALUES(?,?)')->execute([$row['domain'],$r['code']]); $status=hs_outcome($row['domain'],$url,$r['code']); $detail='HTTP '.$r['code']; if (isset($r['headers'])) { try { hs_security_record($db,$row['domain'],$url,$r,$chain); } catch (Throwable $analysisError) { error_log('Security analysis failed: '.$analysisError->getMessage()); $failed=hs_new_report($row['domain'],hs_safe_url($url)); $failed['limitations'][]='Sikkerhedsanalysen kunne ikke afsluttes. HTTP-kontrollen er bevaret; genkontrollér siden efter rettelse.'; hs_report_save($db,$failed); } } }
     } catch (Throwable $e) {
-        $status='error'; $detail=substr($e->getMessage(),0,250);
+        $status='error'; $detail=substr($e->getMessage(),0,250); hs_network_report($db,$row['domain'],$url,$e);
         if (hs_host(parse_url($url,PHP_URL_HOST)??'')!==hs_host($row['domain'])) { $status='review'; $detail='Andet domæne fundet; slutdestination kunne ikke kontrolleres: '.$detail; }
     }
     $db->prepare('UPDATE results SET current_url=?,status=?,detail=?,hops=?,chain=?,checked_at=CURRENT_TIMESTAMP WHERE domain=?')->execute([$url,$status,$detail,$hops,json_encode($chain),$row['domain']]);
@@ -285,7 +297,7 @@ function hs_discovery_tick(PDO $db,callable $fetch,string $phase): void {
 
 function hs_groups(PDO $db,string $search,array $params=[]): array {
     $groups=[];
-    foreach (['all'=>'1=1','review'=>"status='review'",'ok'=>"status='ok'",'errors'=>"status IN ('error','http_error')"] as $key=>$where) {
+    foreach (['all'=>'1=1','review'=>"(status='review' OR EXISTS (SELECT 1 FROM redirect_hops WHERE redirect_hops.domain=results.domain AND external=1))",'ok'=>"status='ok'",'errors'=>"(status IN ('error','http_error') OR EXISTS (SELECT 1 FROM http_results WHERE http_results.domain=results.domain AND code>=400))"] as $key=>$where) {
         $args=[];
         if ($search!=='') {
             $where.=" AND (domain LIKE ? ESCAPE '\\' OR current_url LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\')";
@@ -294,7 +306,7 @@ function hs_groups(PDO $db,string $search,array $params=[]): array {
         $q=$db->prepare('SELECT COUNT(*) FROM results WHERE '.$where); $q->execute($args); $total=(int)$q->fetchColumn();
         $raw=$params['page_'.$key]??0; $requested=is_scalar($raw)?max(0,min(1000000,(int)$raw)):0;
         $page=min($requested,max(0,(int)ceil($total/8)-1));
-        $q=$db->prepare('SELECT * FROM results WHERE '.$where.' ORDER BY checked_at DESC,domain LIMIT 8 OFFSET '.($page*8)); $q->execute($args);
+        $q=$db->prepare('SELECT results.*,(SELECT code FROM http_results WHERE http_results.domain=results.domain) AS http_code,(SELECT code FROM redirect_hops WHERE redirect_hops.domain=results.domain AND external=1 ORDER BY seq LIMIT 1) AS redirect_code,(SELECT to_url FROM redirect_hops WHERE redirect_hops.domain=results.domain AND external=1 ORDER BY seq LIMIT 1) AS redirect_url,(SELECT score FROM reports WHERE reports.domain=results.domain) AS security_score,(SELECT grade FROM reports WHERE reports.domain=results.domain) AS security_grade FROM results WHERE '.$where.' ORDER BY checked_at DESC,domain LIMIT 8 OFFSET '.($page*8)); $q->execute($args);
         $groups[$key]=['rows'=>$q->fetchAll(),'total'=>$total,'page'=>$page,'pages'=>(int)ceil($total/8)];
     }
     return $groups;
@@ -335,3 +347,7 @@ function hs_tranco_domains(string $zip): array {
     if (!$domains) throw new RuntimeException('Tranco-listen indeholdt ingen gyldige .dk-domæner');
     $out=array_keys($domains); sort($out,SORT_STRING); return $out;
 }
+
+require_once __DIR__.'/security.php';
+
+require_once __DIR__.'/users.php';
